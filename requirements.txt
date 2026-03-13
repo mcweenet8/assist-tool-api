@@ -3,4 +3,4 @@ flask-cors
 aiohttp
 pandas
 gunicorn
-
+fotmob-wrapper
