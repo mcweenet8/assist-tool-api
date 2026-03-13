@@ -51,11 +51,13 @@ HEADERS = {
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
 _cache = {
-    "last_updated": None,
-    "top25":        [],
-    "by_league":    {},
-    "fixtures":     {},
-    "status":       "never_run",
+    "last_updated":  None,
+    "top25":         [],
+    "by_league":     {},
+    "fixtures":      {},
+    "all_players":   [],   # full unfiltered list for squad lookups
+    "teams":         [],   # team list with ga_pg for weak def lookup
+    "status":        "never_run",
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -450,8 +452,18 @@ async def run_scraper():
             for team, players in sorted_teams
         ]
 
+    # Full player list for match screen squad lookups
+    all_players_list = [player_dict(p) for _, p in df.iterrows()]
+
+    # Team list for weak def lookups
+    teams_list = [
+        {"team": r["team"], "team_id": r["team_id"],
+         "ga_pg": r["ga_pg"], "weak_def": r["weak_def"]}
+        for _, r in teams_df.iterrows()
+    ]
+
     log.info(f"Scraper done — {len(top25_list)} players, {len(by_league)} leagues")
-    return top25_list, by_league, fixtures
+    return top25_list, by_league, fixtures, all_players_list, teams_list
 
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
@@ -494,13 +506,16 @@ def refresh():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        top25, by_league, fixtures = loop.run_until_complete(run_scraper())
+        top25, by_league, fixtures, all_players_full, teams_list = loop.run_until_complete(run_scraper())
         loop.close()
         _cache["top25"]        = top25
         _cache["by_league"]    = by_league
         _cache["fixtures"]     = fixtures
         _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         _cache["status"]       = "ok"
+        # Store full player + team lists for match screen lookups
+        _cache["all_players"]  = all_players_full
+        _cache["teams"]        = teams_list
         return jsonify({
             "success":      True,
             "last_updated": _cache["last_updated"],
@@ -511,6 +526,108 @@ def refresh():
         _cache["status"] = f"error: {str(e)}"
         log.error(f"Refresh failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+# ── Match screen endpoint ─────────────────────────────────────────────────────
+
+@app.route("/match/<match_id>")
+def match_screen(match_id):
+    """
+    Returns squad intelligence for a fixture.
+    - Pre-kickoff: top ranked players from each squad + weak opp flag
+    - Live/finished: same + live lineups from FotMob
+    """
+    from flask import request
+
+    is_live     = request.args.get("live", "false").lower() == "true"
+    is_finished = request.args.get("finished", "false").lower() == "true"
+    home_id     = request.args.get("home_id", "")
+    away_id     = request.args.get("away_id", "")
+    home_name   = request.args.get("home", "Home")
+    away_name   = request.args.get("away", "Away")
+
+    all_players = _cache.get("all_players", [])
+    teams       = _cache.get("teams", [])
+
+    if not all_players:
+        return jsonify({"error": "No data yet — call /refresh first"}), 503
+
+    # Build team GA/G lookup
+    ga_lookup = {t["team_id"]: t["ga_pg"] for t in teams}
+    home_ga   = ga_lookup.get(home_id, 0)
+    away_ga   = ga_lookup.get(away_id, 0)
+
+    # Get ranked players for each squad
+    home_players = sorted(
+        [p for p in all_players if p["team"] == home_name],
+        key=lambda x: x["score"], reverse=True)
+    away_players = sorted(
+        [p for p in all_players if p["team"] == away_name],
+        key=lambda x: x["score"], reverse=True)
+
+    # Top 25 player names for highlighting
+    top25_names = {p["player"] for p in _cache.get("top25", [])}
+
+    def enrich(players, opp_ga):
+        return [{
+            **p,
+            "in_top25":    p["player"] in top25_names,
+            "weak_opp":    opp_ga >= WEAK_DEF_THRESH,
+        } for p in players]
+
+    result = {
+        "match_id":     match_id,
+        "home":         home_name,
+        "away":         away_name,
+        "home_id":      home_id,
+        "away_id":      away_id,
+        "home_ga_pg":   home_ga,
+        "away_ga_pg":   away_ga,
+        "home_weak_def": home_ga >= WEAK_DEF_THRESH,
+        "away_weak_def": away_ga >= WEAK_DEF_THRESH,
+        "home_players": enrich(home_players, away_ga),   # away = opponent of home players
+        "away_players": enrich(away_players, home_ga),   # home = opponent of away players
+        "lineups":      None,
+    }
+
+    # If live or finished — fetch lineups
+    if is_live or is_finished:
+        try:
+            from fotmob import FotMob
+            async def fetch_lineups():
+                async with FotMob() as fotmob:
+                    return await fotmob.get_match_details(int(match_id))
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            details = loop.run_until_complete(fetch_lineups())
+            loop.close()
+
+            # Extract lineups
+            lineup_data = details.get("lineup", {}) if isinstance(details, dict) else {}
+            lineups = {}
+            for side in ["home", "away"]:
+                side_data = lineup_data.get(side, {})
+                players   = side_data.get("players", [])
+                starters  = []
+                for group in players:
+                    if isinstance(group, list):
+                        for p in group:
+                            if isinstance(p, dict):
+                                name = p.get("name", {})
+                                pname = (name.get("fullName") or
+                                         name.get("lastName") or
+                                         str(name)) if isinstance(name, dict) else str(name)
+                                starters.append({
+                                    "name":     pname.strip(),
+                                    "in_top25": pname.strip() in top25_names,
+                                })
+                lineups[side] = starters
+            result["lineups"] = lineups
+        except Exception as e:
+            log.error(f"lineups {match_id}: {e}")
+            result["lineup_error"] = str(e)
+
+    return jsonify(result)
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
