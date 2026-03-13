@@ -48,6 +48,14 @@ HEADERS = {
     "Referer": "https://www.fotmob.com/",
 }
 
+STAT_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
+                   " AppleWebKit/605.1.15"),
+    "Accept":  "application/json",
+    "Referer": "https://www.fotmob.com/",
+    "x-mas":   "",  # populated at runtime from fotmob wrapper
+}
+
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
 _cache = {
@@ -74,25 +82,20 @@ def combined_score(xa_gap, cc_pg, big_chances, penalties_won):
 
 # ── FotMob data fetchers ──────────────────────────────────────────────────────
 
-async def get_standings(session, league_name, league_id):
-    url = f"https://www.fotmob.com/api/leagues?id={league_id}"
+async def get_standings(fotmob, league_name, league_id):
+    await asyncio.sleep(1.5)
     rows = []
     try:
-        async with session.get(url, headers=HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
-                log.warning(f"standings {league_name}: HTTP {resp.status}")
-                return []
-            data = await resp.json(content_type=None)
-            table = (data.get("table") or
-                     data.get("standings", {}).get("table") or
-                     data.get("tableData", {}).get("table", {}))
-            if isinstance(table, dict):
-                all_rows = table.get("all", [])
-            elif isinstance(table, list):
-                all_rows = table
-            else:
-                all_rows = []
+        data = await fotmob.standings(league_id)
+        if not isinstance(data, list) or not data:
+            log.warning(f"standings {league_name}: no data")
+            return []
+        for item in data:
+            if not isinstance(item, dict): continue
+            table    = item.get("data", {}).get("table", {})
+            all_rows = table.get("all", [])
+            home_lkp = {str(t.get("id","")): t for t in table.get("home", []) if isinstance(t, dict)}
+            away_lkp = {str(t.get("id","")): t for t in table.get("away", []) if isinstance(t, dict)}
             for team in all_rows:
                 if not isinstance(team, dict): continue
                 name   = (team.get("name") or team.get("shortName","")).strip()
@@ -100,6 +103,12 @@ async def get_standings(session, league_name, league_id):
                 played = safe_float(team.get("played", 0))
                 try:    gf, ga = [safe_float(x) for x in team.get("scoresStr","0-0").split("-")]
                 except: gf, ga = 0.0, 0.0
+                ht   = home_lkp.get(tid, {})
+                at   = away_lkp.get(tid, {})
+                h_pl = safe_float(ht.get("played", played/2))
+                a_pl = safe_float(at.get("played", played/2))
+                try:    gf_h, _ = [safe_float(x) for x in ht.get("scoresStr","0-0").split("-")]
+                except: gf_h = 0.0
                 if name and played > 0:
                     rows.append({
                         "team":      name,
@@ -115,27 +124,20 @@ async def get_standings(session, league_name, league_id):
     return rows
 
 
-async def get_season_id(session, league_id):
-    url = f"https://www.fotmob.com/api/leagues?id={league_id}"
+async def get_season_id(fotmob, team_id):
     try:
-        async with session.get(url, headers=HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
-                return ""
-            data  = await resp.json(content_type=None)
-            links = data.get("stats", {}).get("seasonStatLinks", [])
-            for entry in links:
-                if entry.get("isTotal") or entry.get("isCurrent"):
-                    sid = str(entry.get("seasonId", ""))
-                    if sid and sid.isdigit():
-                        return sid
-            for entry in links:
-                sid = str(entry.get("seasonId", ""))
-                if sid and sid.isdigit():
-                    return sid
+        data = await fotmob.get_team(int(team_id))
+        sid  = str(data.get("stats", {}).get("primarySeasonId", ""))
+        if sid and sid.isdigit():
+            return sid
+        for entry in data.get("stats", {}).get("seasonStatLinks", []):
+            s = str(entry.get("seasonId", ""))
+            if s and s.isdigit():
+                return s
+        return ""
     except Exception as e:
-        log.error(f"season_id {league_id}: {e}")
-    return ""
+        log.error(f"season_id {team_id}: {e}")
+        return ""
 
 
 async def fetch_stat(session, league_id, season_id, stat_name, all_team_ids):
@@ -170,17 +172,17 @@ async def fetch_stat(session, league_id, season_id, stat_name, all_team_ids):
 
 async def run_scraper():
     import pandas as pd
+    from fotmob import FotMob
 
     log.info("Scraper starting...")
     all_team_rows   = []
     all_player_rows = []
 
-    async with aiohttp.ClientSession() as session:
+    async with FotMob() as fotmob:
 
-        # Pass 1 — Standings
+        # Pass 1 — Standings via fotmob wrapper (handles auth token)
         for league_name, info in LEAGUES.items():
-            await asyncio.sleep(0.5)
-            rows = await get_standings(session, league_name, info["id"])
+            rows = await get_standings(fotmob, league_name, info["id"])
             all_team_rows.extend(rows)
 
         if not all_team_rows:
@@ -190,27 +192,35 @@ async def run_scraper():
         all_team_ids = set(str(tid) for tid in teams_df["team_id"].tolist())
         log.info(f"Standings: {len(teams_df)} teams")
 
-        # Pass 2 — Season IDs
+        # Pass 2 — Season IDs via fotmob wrapper
         league_seasons = {}
         for league_name, info in LEAGUES.items():
-            await asyncio.sleep(0.5)
-            sid = await get_season_id(session, info["id"])
+            lt = teams_df[teams_df["league"] == league_name]
+            if lt.empty: continue
+            await asyncio.sleep(0.8)
+            sid = await get_season_id(fotmob, lt.iloc[0]["team_id"])
             if sid:
                 league_seasons[info["id"]] = sid
                 log.info(f"Season ID {league_name}: {sid}")
             else:
                 log.warning(f"No season ID for {league_name}")
 
-        # Pass 3 — Player stats
+        # Pass 3 — Player stats using fotmob wrapper session for auth
+        fotmob_session = getattr(fotmob, "_session", None) or getattr(fotmob, "session", None)
+        sess = fotmob_session or aiohttp.ClientSession()
+
         for league_name, info in LEAGUES.items():
             lid = info["id"]
             sid = league_seasons.get(lid)
             if not sid: continue
             for stat_name in STATS:
                 await asyncio.sleep(0.3)
-                rows = await fetch_stat(session, lid, sid, stat_name, all_team_ids)
+                rows = await fetch_stat(sess, lid, sid, stat_name, all_team_ids)
                 all_player_rows.extend(rows)
             log.info(f"Players fetched: {league_name}")
+
+        if fotmob_session is None and sess:
+            await sess.close()
 
     if not all_player_rows:
         raise RuntimeError("No player data — season IDs may be wrong or endpoint blocked")
