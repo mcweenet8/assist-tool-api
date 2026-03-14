@@ -43,6 +43,16 @@ STATS = {
     "penalty_won":             "penalties_won",
 }
 
+GS_STATS = {
+    "goals":                   "goals",
+    "expected_goals":          "xg",
+    "expected_goals_per_90":   "xg_per90",
+    "expected_goalsontarget":  "xgot",
+    "ontarget_scoring_att":    "sot_per90",
+    "total_scoring_att":       "shots_per90",
+    "big_chance_missed":       "big_chances_missed",
+}
+
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
                    " AppleWebKit/605.1.15"),
@@ -71,7 +81,10 @@ _cache = {
     "top25":         [],
     "by_league":     {},
     "fixtures":      {},
-    "all_players":   [],   # full unfiltered list for squad lookups
+    "all_players":   [],   # full unfiltered list for squad look
+    "gs_top25":      [],
+    "gs_all":        [],
+    "gs_by_league":  {},
     "teams":         [],   # team list with ga_pg for weak def lookup
     "status":        "never_run",
 }
@@ -83,6 +96,15 @@ def safe_float(v):
         return float(str(v).replace(",","").strip()) if v not in [None,""," ","-","N/A"] else 0.0
     except:
         return 0.0
+
+def gs_score(xgot_gap, sot_per90, xg_per90, big_chances_missed):
+    """Goal scorer score formula."""
+    return round(
+        (xgot_gap          * 0.35) +
+        (sot_per90         * 0.25) +
+        (xg_per90          * 0.20) +
+        (big_chances_missed * 0.20), 2)
+
 
 def combined_score(xa_gap, cc_pg, big_chances, penalties_won, opp_ga_pg=0.0, l5_xa=0.0):
     return round(
@@ -584,6 +606,37 @@ async def run_scraper():
             rows = await fetch_league_stats(ln, info)
             all_player_rows.extend(rows)
 
+        # Pass 3b — Goal scorer stats (same leagues, separate stat set)
+        log.info("Pass 3b: goal scorer stats...")
+        async def fetch_gs_stats(league_name, info):
+            lid = info["id"]
+            sid = league_seasons.get(lid)
+            if not sid:
+                return []
+            tasks = [
+                fetch_stat(sess, lid, sid, stat_name, all_team_ids)
+                for stat_name in GS_STATS
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            rows = []
+            for r in results:
+                if isinstance(r, list):
+                    rows.extend(r)
+            log.info(f"  GS {league_name}: {len(rows)} rows")
+            return rows
+
+        gs_tasks = [fetch_gs_stats(ln, info) for ln, info in PRIORITY_LEAGUES.items()]
+        gs_results = await asyncio.gather(*gs_tasks, return_exceptions=True)
+        all_gs_rows = []
+        for r in gs_results:
+            if isinstance(r, list):
+                all_gs_rows.extend(r)
+        # A-League GS with delay
+        for ln, info in DELAYED_LEAGUES.items():
+            await asyncio.sleep(2)
+            rows = await fetch_gs_stats(ln, info)
+            all_gs_rows.extend(rows)
+
         if fotmob_session is None and sess:
             await sess.close()
 
@@ -760,8 +813,88 @@ async def run_scraper():
         for _, r in teams_df.iterrows()
     ]
 
+    # ── Goal Scorer aggregation ─────────────────────────────────────────────
+    team_name_map = {r["team"]: r.get("ga_pg", 0.0) for _, r in teams_df.iterrows()}
+    gs_agg = {}
+    for row in all_gs_rows:
+        pid   = str(row.get("player_id",""))
+        tid   = str(row.get("team_id",""))
+        key   = (pid, tid)
+        stype = row.get("stat_type","")
+        val   = safe_float(row.get("stat_value", 0))
+        if key not in gs_agg:
+            gs_agg[key] = {
+                "player": row["player"], "player_id": pid,
+                "team": row["team"],     "team_id": tid,
+                "league": tlg.get(tid, ""),
+                "goals": 0.0, "xg": 0.0, "xg_per90": 0.0,
+                "xgot": 0.0,  "sot_per90": 0.0, "shots_per90": 0.0,
+                "big_chances_missed": 0.0,
+            }
+        if stype in gs_agg[key]:
+            gs_agg[key][stype] = val
+
+    gs_top25_list    = []
+    gs_all_list      = []
+    gs_by_league     = {}
+
+    if gs_agg:
+        gs_df = pd.DataFrame(list(gs_agg.values()))
+        gs_df["xgot_gap"] = (gs_df["xgot"] - gs_df["goals"]).round(2)
+        gs_df["gs_score"] = gs_df.apply(
+            lambda r: gs_score(r["xgot_gap"], r["sot_per90"],
+                               r["xg_per90"], r["big_chances_missed"])
+            if r["xg_per90"] > 0 else 0.0, axis=1)
+        gs_df = gs_df[gs_df["gs_score"] > 0].sort_values("gs_score", ascending=False)
+
+        def gs_player_dict(p):
+            tname    = p["team"]
+            form     = team_form.get(tname, [])
+            next_opp = team_next_opp.get(tname)
+            return {
+                "player":             p["player"],
+                "player_id":          str(p.get("player_id","")),
+                "team":               p["team"],
+                "team_id":            str(p["team_id"]),
+                "league":             p["league"],
+                "gs_score":           round(float(p["gs_score"]), 2),
+                "goals":              int(p["goals"]),
+                "xg":                 round(float(p["xg"]), 2),
+                "xg_per90":           round(float(p["xg_per90"]), 2),
+                "xgot":               round(float(p["xgot"]), 2),
+                "xgot_gap":           round(float(p["xgot_gap"]), 2),
+                "sot_per90":          round(float(p["sot_per90"]), 2),
+                "shots_per90":        round(float(p["shots_per90"]), 2),
+                "big_chances_missed": int(p["big_chances_missed"]),
+                "form":               form,
+                "form_score":         form_score(form),
+                "next_opponent":      next_opp.get("opponent") if next_opp else None,
+                "next_kickoff":       next_opp.get("kickoff")  if next_opp else None,
+                "weak_opp_def":       next_opp.get("weak_def") if next_opp else False,
+                "player_img":         player_img_url(str(p.get("player_id",""))),
+                "team_logo":          team_logo_url(str(p.get("team_id",""))),
+            }
+
+        gs_top25_list = [gs_player_dict(p) for _, p in gs_df.head(25).iterrows()]
+        gs_all_list   = [gs_player_dict(p) for _, p in gs_df.iterrows()]
+
+        for _, p in gs_df.iterrows():
+            lg = p["league"]
+            if not lg: continue
+            if lg not in gs_by_league: gs_by_league[lg] = {}
+            tm = p["team"]
+            if tm not in gs_by_league[lg]: gs_by_league[lg][tm] = []
+            gs_by_league[lg][tm].append(gs_player_dict(p))
+
+        gs_by_league = {
+            lg: [{"team": tm, "players": pls} for tm, pls in sorted(tms.items())]
+            for lg, tms in gs_by_league.items()
+        }
+
+    log.info(f"Goal scorer: {len(gs_top25_list)} top25, {len(gs_all_list)} total")
+
     log.info(f"Scraper done — {len(top25_list)} players, {len(by_league)} leagues: {list(by_league.keys())}")
-    return top25_list, by_league, fixtures, all_players_list, teams_list
+    return top25_list, by_league, fixtures, all_players_list, teams_list, gs_top25_list, gs_all_list, gs_by_league
 
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
@@ -789,6 +922,9 @@ def data():
         "top25":        _cache["top25"],
         "by_league":    _cache["by_league"],
         "all_players":  _cache.get("all_players", []),
+        "gs_top25":     _cache.get("gs_top25", []),
+        "gs_all":       _cache.get("gs_all", []),
+        "gs_by_league": _cache.get("gs_by_league", {}),
     })
 
 @app.route("/fixtures")
@@ -807,16 +943,18 @@ def refresh():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        top25, by_league, fixtures, all_players_full, teams_list = loop.run_until_complete(run_scraper())
+        top25, by_league, fixtures, all_players_full, teams_list, gs_top25, gs_all, gs_by_league = loop.run_until_complete(run_scraper())
         loop.close()
         _cache["top25"]        = top25
         _cache["by_league"]    = by_league
         _cache["fixtures"]     = fixtures
         _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         _cache["status"]       = "ok"
-        # Store full player + team lists for match screen lookups
         _cache["all_players"]  = all_players_full
         _cache["teams"]        = teams_list
+        _cache["gs_top25"]     = gs_top25
+        _cache["gs_all"]       = gs_all
+        _cache["gs_by_league"] = gs_by_league
         return jsonify({
             "success":      True,
             "last_updated": _cache["last_updated"],
