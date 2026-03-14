@@ -1417,8 +1417,12 @@ def live_match(match_id):
         if "error" in data:
             return jsonify(data), 503
 
+        # Log full top-level keys to understand structure
+        log.info(f"live {match_id} top keys: {list(data.keys())[:10]}")
         content = data.get("content", {})
         header  = data.get("header", {})
+        log.info(f"live {match_id} content keys: {list(content.keys())[:10]}")
+        log.info(f"live {match_id} header keys: {list(header.keys())[:10]}")
         teams   = header.get("teams", [{}, {}])
         home_id = str(teams[0].get("id","")) if teams else ""
         away_id = str(teams[1].get("id","")) if len(teams) > 1 else ""
