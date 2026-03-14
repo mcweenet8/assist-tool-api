@@ -1037,28 +1037,36 @@ AF_LEAGUE_MAP = {
     901954: 188,  # A-League Men
 }
 
-_lineup_cache = {}  # match_key → {lineup, fetched_at}
+_lineup_cache   = {}  # match_key → lineup data
+_fixtures_cache = {}  # date_str  → list of AF fixtures (saves API calls)
 
 async def af_fixture_id(home_team, away_team, match_date):
-    """Find API-Football fixture ID by team names and date."""
+    """Find API-Football fixture ID by team names and date.
+    Caches fixture list per date so only 1 API call per day regardless of lookups."""
     try:
-        url = f"{AF_BASE}/fixtures"
-        params = {"date": match_date[:10], "timezone": "UTC"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=AF_HEADERS, params=params,
-                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    log.warning(f"AF fixtures: HTTP {resp.status}")
-                    return None
-                data = await resp.json(content_type=None)
-        fixtures = data.get("response", [])
-        log.info(f"AF: {len(fixtures)} fixtures on {match_date[:10]}")
+        date_str = match_date[:10]
+        # Use cached fixture list if available
+        if date_str in _fixtures_cache:
+            fixtures = _fixtures_cache[date_str]
+            log.info(f"AF: using cached {len(fixtures)} fixtures for {date_str}")
+        else:
+            url = f"{AF_BASE}/fixtures"
+            params = {"date": date_str, "timezone": "UTC"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=AF_HEADERS, params=params,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        log.warning(f"AF fixtures: HTTP {resp.status}")
+                        return None
+                    data = await resp.json(content_type=None)
+            fixtures = data.get("response", [])
+            _fixtures_cache[date_str] = fixtures
+            log.info(f"AF: fetched {len(fixtures)} fixtures for {date_str} (cached)")
         home_lower = home_team.lower().replace(" fc","").replace(" cf","").strip()
         away_lower = away_team.lower().replace(" fc","").replace(" cf","").strip()
         for f in fixtures:
             h = f.get("teams",{}).get("home",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
             a = f.get("teams",{}).get("away",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
-            log.info(f"  AF: {h} vs {a}")
             h_words = set(h.split())
             a_words = set(a.split())
             home_words = set(home_lower.split())
