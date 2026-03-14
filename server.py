@@ -1019,6 +1019,141 @@ def standings():
     })
 
 
+# ── Confirmed Lineups via API-Football ───────────────────────────────────────
+
+AF_KEY     = os.environ.get("API_FOOTBALL_KEY", "")
+AF_BASE    = "https://v3.football.api-sports.io"
+AF_HEADERS = {"x-apisports-key": AF_KEY}
+
+# League ID mapping FotMob → API-Football
+AF_LEAGUE_MAP = {
+    47:     39,   # Premier League
+    48:     40,   # Championship
+    87:     140,  # La Liga
+    55:     135,  # Serie A
+    54:     78,   # Bundesliga
+    53:     61,   # Ligue 1
+    130:    253,  # MLS
+    901954: 188,  # A-League Men
+}
+
+_lineup_cache = {}  # match_key → {lineup, fetched_at}
+
+def af_fixture_id(home_team, away_team, match_date):
+    """Find API-Football fixture ID by team names and date."""
+    try:
+        # Search by date
+        url = f"{AF_BASE}/fixtures"
+        params = {"date": match_date[:10], "timezone": "UTC"}
+        resp = requests.get(url, headers=AF_HEADERS, params=params, timeout=10)
+        if resp.status_code != 200:
+            log.warning(f"AF fixtures: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        fixtures = data.get("response", [])
+        home_lower = home_team.lower()
+        away_lower = away_team.lower()
+        for f in fixtures:
+            h = f.get("teams",{}).get("home",{}).get("name","").lower()
+            a = f.get("teams",{}).get("away",{}).get("name","").lower()
+            # Fuzzy match
+            if (home_lower in h or h in home_lower) and                (away_lower in a or a in away_lower):
+                return f.get("fixture",{}).get("id")
+        log.warning(f"AF: no fixture found for {home_team} vs {away_team} on {match_date}")
+        return None
+    except Exception as e:
+        log.error(f"af_fixture_id: {e}")
+        return None
+
+
+def af_lineups(fixture_id):
+    """Fetch confirmed lineups from API-Football."""
+    try:
+        url = f"{AF_BASE}/fixtures/lineups"
+        resp = requests.get(url, headers=AF_HEADERS,
+                           params={"fixture": fixture_id}, timeout=10)
+        if resp.status_code != 200:
+            log.warning(f"AF lineups: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        teams = data.get("response", [])
+        if not teams:
+            return None
+
+        result = {}
+        for team_data in teams:
+            team_name = team_data.get("team", {}).get("name", "")
+            formation = team_data.get("formation", "")
+            starters  = []
+            bench     = []
+            for p in team_data.get("startXI", []):
+                player = p.get("player", {})
+                starters.append({
+                    "name":   player.get("name", ""),
+                    "number": player.get("number", ""),
+                    "pos":    player.get("pos", ""),
+                    "grid":   player.get("grid", ""),
+                })
+            for p in team_data.get("substitutes", []):
+                player = p.get("player", {})
+                bench.append({
+                    "name":   player.get("name", ""),
+                    "number": player.get("number", ""),
+                    "pos":    player.get("pos", ""),
+                })
+            result[team_name] = {
+                "formation": formation,
+                "starters":  starters,
+                "bench":     bench,
+            }
+        return result if result else None
+    except Exception as e:
+        log.error(f"af_lineups {fixture_id}: {e}")
+        return None
+
+
+@app.route("/lineups/<match_id>")
+def lineups(match_id):
+    """Fetch confirmed lineups for a match via API-Football."""
+    if not AF_KEY:
+        return jsonify({"error": "API_FOOTBALL_KEY not configured"}), 503
+
+    from flask import request as freq
+    home      = freq.args.get("home", "")
+    away      = freq.args.get("away", "")
+    kickoff   = freq.args.get("kickoff", "")
+
+    if not home or not away or not kickoff:
+        return jsonify({"error": "home, away, kickoff required"}), 400
+
+    # Check cache (lineups don't change once confirmed)
+    cache_key = f"{home}_{away}_{kickoff[:10]}"
+    if cache_key in _lineup_cache:
+        cached = _lineup_cache[cache_key]
+        return jsonify(cached)
+
+    # Find API-Football fixture ID
+    fixture_id = af_fixture_id(home, away, kickoff)
+    if not fixture_id:
+        return jsonify({"confirmed": False, "message": "Match not found on API-Football"}), 200
+
+    # Fetch lineups
+    lineup_data = af_lineups(fixture_id)
+    if not lineup_data:
+        return jsonify({"confirmed": False,
+                        "message": "Lineups not yet released",
+                        "fixture_id": fixture_id}), 200
+
+    result = {
+        "confirmed":  True,
+        "fixture_id": fixture_id,
+        "lineups":    lineup_data,
+    }
+    _lineup_cache[cache_key] = result
+    log.info(f"Lineups confirmed: {home} vs {away} (fixture {fixture_id})")
+    return jsonify(result)
+
+
 # ── Player detail endpoint ───────────────────────────────────────────────────
 
 @app.route("/player/<player_id>")
