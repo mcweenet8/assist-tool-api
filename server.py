@@ -494,6 +494,10 @@ async def run_scraper():
             "next_opponent":    next_opp.get("opponent")    if next_opp else None,
             "next_kickoff":     next_opp.get("kickoff")     if next_opp else None,
             "weak_opp_def":     next_opp.get("weak_def")    if next_opp else False,
+            # Images
+            "player_id":        str(p.get("player_id", "") if hasattr(p, "get") else ""),
+            "player_img":       player_img_url(str(p.get("player_id", "") if hasattr(p, "get") else "")),
+            "team_logo":        team_logo_url(str(p.get("team_id", "") if hasattr(p, "get") else "")),
         }
 
     # Top 25
