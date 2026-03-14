@@ -165,7 +165,10 @@ async def get_standings(fotmob, league_name, league_id):
                         "goals_scored_pg": gf_pg,
                         "weak_def":  ga_pg >= WEAK_DEF_THRESH,
                     })
-        log.info(f"standings {league_name}: {len(rows)} teams")
+        if len(rows) == 0:
+            log.warning(f"standings {league_name}: 0 teams — raw data keys: {[list(item.get('data',{}).keys())[:5] for item in data[:2]] if isinstance(data, list) else str(data)[:100]}")
+        else:
+            log.info(f"standings {league_name}: {len(rows)} teams")
     except Exception as e:
         log.error(f"standings {league_name}: {e}")
     return rows
@@ -291,7 +294,11 @@ async def get_fixtures_for_dates(fotmob, days=7):
             for league in leagues:
                 if not isinstance(league, dict): continue
                 lid = str(league.get("id", ""))
-                if lid not in league_ids: continue
+                if lid not in league_ids:
+                    # Log unmatched IDs to help debug MLS/A-League
+                    if any(x in league.get("name","").lower() for x in ["mls","a-league","aleague","australia"]):
+                        log.info(f"  UNMATCHED league: id={lid} name={league.get('name','')}")
+                    continue
                 ln  = id_to_league[lid]
                 for match in league.get("matches", []):
                     if not isinstance(match, dict): continue
