@@ -341,8 +341,12 @@ async def get_fixtures_for_dates(fotmob, days=7):
                 lid = str(league.get("id", ""))
                 if lid not in league_ids:
                     name_lower = league.get("name","").lower()
-                    if any(x in name_lower for x in ["mls","a-league","aleague","australia","major league"]):
+                    if any(x in name_lower for x in ["mls","a-league","aleague","australia","major league","championship","portsmouth","derby","portsmouth"]):
                         log.info(f"  UNMATCHED: id={lid} name={league.get('name','')}")
+                    # Log ALL unmatched English leagues for debugging
+                    ccode = league.get("ccode","").lower()
+                    if ccode in ("eng","gb","gbr","uk"):
+                        log.info(f"  UNMATCHED ENG: id={lid} name={league.get('name','')} ccode={ccode}")
                     continue
                 ln  = id_to_league[lid]
                 for match in league.get("matches", []):
