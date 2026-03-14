@@ -639,8 +639,23 @@ async def run_scraper():
 
     # Team list for weak def lookups
     teams_list = [
-        {"team": r["team"], "team_id": r["team_id"],
-         "ga_pg": r["ga_pg"], "weak_def": r["weak_def"]}
+        {
+            "team":      r["team"],
+            "team_id":   str(r["team_id"]),
+            "league":    r["league"],
+            "table_pos": safe_float(r.get("table_pos", 99)),
+            "played":    int(r.get("played", 0)),
+            "gf_pg":     round(float(r.get("gf_pg", 0)), 2),
+            "ga_pg":     round(float(r.get("ga_pg", 0)), 2),
+            "gf_h_pg":   round(float(r.get("gf_h_pg", 0)), 2),
+            "ga_h_pg":   round(float(r.get("ga_h_pg", 0)), 2),
+            "gf_a_pg":   round(float(r.get("gf_a_pg", 0)), 2),
+            "ga_a_pg":   round(float(r.get("ga_a_pg", 0)), 2),
+            "home_adv":  round(float(r.get("home_adv", 0)), 2),
+            "away_vuln": round(float(r.get("away_vuln", 0)), 2),
+            "weak_def":  bool(r.get("weak_def", False)),
+            "team_logo": team_logo_url(str(r.get("team_id",""))),
+        }
         for _, r in teams_df.iterrows()
     ]
 
