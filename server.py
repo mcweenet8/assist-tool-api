@@ -82,12 +82,13 @@ def safe_float(v):
     except:
         return 0.0
 
-def combined_score(xa_gap, cc_pg, big_chances, penalties_won):
+def combined_score(xa_gap, cc_pg, big_chances, penalties_won, l5_xa=0.0):
     return round(
-        (xa_gap        * 0.35) +
-        (cc_pg         * 0.30) +
-        (big_chances   * 0.20) +
-        (penalties_won * 0.15), 2)
+        (xa_gap        * 0.30) +
+        (cc_pg         * 0.25) +
+        (big_chances   * 0.15) +
+        (penalties_won * 0.10) +
+        (l5_xa         * 0.20), 2)
 
 def form_score(last5):
     """Convert last 5 results to a 0-1 form score. W=1, D=0.5, L=0"""
@@ -306,6 +307,83 @@ async def get_fixtures_for_dates(fotmob, days=7):
     return fixtures_by_league
 
 
+# ── Player L5 xA fetcher ─────────────────────────────────────────────────────
+
+async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
+    """
+    Fetch last 5 matches for a player's team, extract their xA per game.
+    Returns list of {opponent, result, score, xa, date} dicts.
+    """
+    games = []
+    try:
+        fixtures = await fotmob.get_team_last_fixtures(int(team_id))
+        matches  = fixtures if isinstance(fixtures, list) else []
+        # Take last 5 finished matches
+        recent = [m for m in matches if isinstance(m, dict)][-5:]
+
+        for match in recent:
+            match_id   = match.get("id") or match.get("matchId")
+            home       = match.get("home", {})
+            away       = match.get("away", {})
+            home_id    = str(home.get("id", ""))
+            is_home    = home_id == str(team_id)
+            opponent   = away.get("name","") if is_home else home.get("name","")
+            h_score    = safe_float(home.get("score", -1))
+            a_score    = safe_float(away.get("score", -1))
+            if is_home:
+                result = "W" if h_score > a_score else "D" if h_score == a_score else "L"
+                score  = f"{int(h_score)}-{int(a_score)}"
+            else:
+                result = "W" if a_score > h_score else "D" if h_score == a_score else "L"
+                score  = f"{int(a_score)}-{int(h_score)}"
+
+            # Fetch match details to get player xA
+            xa_val  = 0.0
+            minutes = 0
+            try:
+                if match_id:
+                    details = await fotmob.get_match_details(int(match_id))
+                    lineup  = details.get("lineup", {}) if isinstance(details, dict) else {}
+                    for side in ["home", "away"]:
+                        side_data = lineup.get(side, {})
+                        for group in side_data.get("players", []):
+                            if isinstance(group, list):
+                                for p in group:
+                                    if not isinstance(p, dict): continue
+                                    pid = str(p.get("id", ""))
+                                    if pid == str(player_id):
+                                        stats = p.get("stats", {})
+                                        if isinstance(stats, list):
+                                            for stat_group in stats:
+                                                if isinstance(stat_group, dict):
+                                                    for k, v in stat_group.items():
+                                                        if "xA" in str(k) or "expected_assist" in str(k).lower():
+                                                            xa_val = safe_float(v)
+                                        elif isinstance(stats, dict):
+                                            xa_val = safe_float(
+                                                stats.get("xA") or
+                                                stats.get("expected_assists") or
+                                                stats.get("ExpectedAssists", 0))
+                                        minutes = safe_float(p.get("minutesPlayed", 0) or
+                                                            p.get("timeSubbedIn", 0))
+            except Exception as e:
+                log.warning(f"  match details {match_id}: {e}")
+
+            utc = match.get("status", {}).get("utcTime", "") or match.get("utcTime", "")
+            games.append({
+                "opponent": opponent,
+                "result":   result,
+                "score":    score,
+                "xa":       xa_val,
+                "minutes":  int(minutes),
+                "date":     utc[:10] if utc else "",
+            })
+    except Exception as e:
+        log.error(f"player_l5 {player_name}: {e}")
+
+    return games
+
+
 # ── Main scraper ──────────────────────────────────────────────────────────────
 
 async def run_scraper():
@@ -453,6 +531,7 @@ async def run_scraper():
                 "assists":         0.0, "xa":              0.0,
                 "xa_per90":        0.0, "big_chances":     0.0,
                 "chances_created": 0.0, "penalties_won":   0.0,
+                "l5_xa":           0.0,
             }
         st = row["stat_type"]
         if st in agg[key]:
@@ -467,7 +546,8 @@ async def run_scraper():
     df["score"]  = df.apply(
         lambda r: combined_score(
             r["xa_gap"], r["chances_per_game"],
-            r["big_chances"], r["penalties_won"])
+            r["big_chances"], r["penalties_won"],
+            r.get("l5_xa", 0.0))
         if (r["xa"] > 0 or r["chances_per_game"] > 0) else 0.0, axis=1)
 
     df = df[df["score"] > 0].sort_values("score", ascending=False).reset_index(drop=True)
@@ -488,6 +568,7 @@ async def run_scraper():
             "chances_per_game": round(float(p["chances_per_game"]), 2),
             "big_chances":      int(p["big_chances"]),
             "penalties_won":    int(p["penalties_won"]),
+            "l5_xa":            round(float(p.get("l5_xa", 0.0)), 2),
             # Form
             "form":             form,
             "form_score":       form_score(form),
@@ -726,6 +807,49 @@ def match_screen(match_id):
             result["lineup_error"] = str(e)
 
     return jsonify(result)
+
+
+# ── Player detail endpoint ───────────────────────────────────────────────────
+
+@app.route("/player/<player_id>")
+def player_detail(player_id):
+    """Fetch L5 xA for a specific player on demand."""
+    from flask import request
+
+    team_id     = request.args.get("team_id", "")
+    player_name = request.args.get("name", "")
+
+    if not team_id:
+        return jsonify({"error": "team_id required"}), 400
+
+    # Find player in cache for base stats
+    all_players = _cache.get("all_players", [])
+    player_data = next((p for p in all_players
+                        if str(p.get("player_id","")) == str(player_id)), None)
+
+    try:
+        from fotmob import FotMob
+        async def fetch():
+            async with FotMob() as fotmob:
+                return await get_player_l5_xa(fotmob, player_id, team_id, player_name)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        l5_games = loop.run_until_complete(fetch())
+        loop.close()
+
+        # Calculate L5 xA total
+        l5_xa_total = round(sum(g["xa"] for g in l5_games), 2)
+
+        return jsonify({
+            "player_id":   player_id,
+            "player_name": player_name,
+            "l5_games":    l5_games,
+            "l5_xa_total": l5_xa_total,
+            "base_stats":  player_data,
+        })
+    except Exception as e:
+        log.error(f"player_detail {player_id}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
