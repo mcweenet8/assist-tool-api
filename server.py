@@ -135,10 +135,10 @@ async def get_standings(fotmob, league_name, league_id):
                 at   = away_lkp.get(tid, {})
                 h_pl = safe_float(ht.get("played", played/2))
                 a_pl = safe_float(at.get("played", played/2))
-                try:    _, ga_h = [safe_float(x) for x in ht.get("scoresStr","0-0").split("-")]
-                except: ga_h = 0.0
-                try:    _, ga_a = [safe_float(x) for x in at.get("scoresStr","0-0").split("-")]
-                except: ga_a = 0.0
+                try:    gf_h, ga_h = [safe_float(x) for x in ht.get("scoresStr","0-0").split("-")]
+                except: gf_h, ga_h = 0.0, 0.0
+                try:    gf_a, ga_a = [safe_float(x) for x in at.get("scoresStr","0-0").split("-")]
+                except: gf_a, ga_a = 0.0, 0.0
                 if name and played > 0:
                     ga_pg   = round(ga / played, 2)
                     ga_h_pg = round(ga_h / h_pl, 2) if h_pl > 0 else 0.0
@@ -937,14 +937,16 @@ def player_detail(player_id):
         loop.close()
 
         # Calculate L5 xA total
-        l5_xa_total = round(sum(g["xa"] for g in l5_games), 2)
+        l5_g = sum(g.get("goals",0) for g in l5_games)
+        l5_a = sum(g.get("assists",0) for g in l5_games)
 
         return jsonify({
-            "player_id":   player_id,
-            "player_name": player_name,
-            "l5_games":    l5_games,
-            "l5_xa_total": l5_xa_total,
-            "base_stats":  player_data,
+            "player_id":        player_id,
+            "player_name":      player_name,
+            "l5_games":         l5_games,
+            "l5_goals_total":   l5_g,
+            "l5_assists_total": l5_a,
+            "base_stats":       player_data,
         })
     except Exception as e:
         log.error(f"player_detail {player_id}: {e}")
