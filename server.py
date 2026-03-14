@@ -143,6 +143,15 @@ async def get_standings(fotmob, league_name, league_id):
             all_team_rows_in_league.extend([t for t in all_rows if isinstance(t, dict)])
         home_lkp = home_lkp_combined
         away_lkp = away_lkp_combined
+        # Deduplicate by team ID (MLS conference format can produce duplicates)
+        seen_ids = set()
+        deduped = []
+        for t in all_team_rows_in_league:
+            tid = str(t.get("id",""))
+            if tid and tid not in seen_ids:
+                seen_ids.add(tid)
+                deduped.append(t)
+        all_team_rows_in_league = deduped
         log.info(f"standings {league_name}: {len(all_team_rows_in_league)} raw rows to process")
         for team in all_team_rows_in_league:
                 if not isinstance(team, dict): continue
@@ -319,9 +328,9 @@ async def get_fixtures_for_dates(fotmob, days=7):
                 if not isinstance(league, dict): continue
                 lid = str(league.get("id", ""))
                 if lid not in league_ids:
-                    # Log unmatched IDs to help debug MLS/A-League
-                    if any(x in league.get("name","").lower() for x in ["mls","a-league","aleague","australia"]):
-                        log.info(f"  UNMATCHED league: id={lid} name={league.get('name','')}")
+                    name_lower = league.get("name","").lower()
+                    if any(x in name_lower for x in ["mls","a-league","aleague","australia","major league"]):
+                        log.info(f"  UNMATCHED: id={lid} name={league.get('name','')}")
                     continue
                 ln  = id_to_league[lid]
                 for match in league.get("matches", []):
