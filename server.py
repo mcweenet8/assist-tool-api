@@ -24,14 +24,14 @@ WEAK_DEF_THRESH = 1.3   # GA/G above this = weak defence flag
 FORM_MATCHES    = 5     # last N matches for form
 
 LEAGUES = {
-    "Premier League": {"id": 47, "short": "PL"},
-    "Championship":   {"id": 48, "short": "Champ"},
-    "La Liga":        {"id": 87, "short": "LaLiga"},
-    "Serie A":        {"id": 55, "short": "SerieA"},
-    "Bundesliga":     {"id": 54, "short": "Bundesliga"},
-    "Ligue 1":        {"id": 53, "short": "Ligue1"},
-    "MLS":            {"id": 130, "short": "MLS"},
-    "A-League Men":   {"id": 901954, "short": "ALeague"},
+    "Premier League": {"id": 47,     "short": "PL"},
+    "Championship":   {"id": 48,     "short": "Champ"},
+    "La Liga":        {"id": 87,     "short": "LaLiga"},
+    "Serie A":        {"id": 55,     "short": "SerieA"},
+    "Bundesliga":     {"id": 54,     "short": "Bundesliga"},
+    "Ligue 1":        {"id": 53,     "short": "Ligue1"},
+    "MLS":            {"id": 130,    "short": "MLS",     "fixture_id": 913550},
+    "A-League Men":   {"id": 901954, "short": "ALeague", "fixture_id": 901954},
 }
 
 STATS = {
