@@ -86,11 +86,10 @@ def safe_float(v):
 
 def combined_score(xa_gap, cc_pg, big_chances, penalties_won, opp_ga_pg=0.0, l5_xa=0.0):
     return round(
-        (xa_gap        * 0.30) +
-        (cc_pg         * 0.25) +
-        (big_chances   * 0.15) +
-        (penalties_won * 0.10) +
-        (opp_ga_pg     * 0.20), 2)
+        (xa_gap        * 0.40) +
+        (cc_pg         * 0.30) +
+        (big_chances   * 0.20) +
+        (penalties_won * 0.10), 2)
 
 def form_score(last5):
     """Convert last 5 results to a 0-1 form score. W=1, D=0.5, L=0"""
@@ -667,25 +666,6 @@ async def run_scraper():
         if r["games"] > 0 and r["chances_created"] > 0
         else round(r["xa_per90"] * 3.5, 2), axis=1)
     df["xa_gap"] = (df["xa"] - df["assists"]).round(1)
-
-    # Join opponent GA/G into player rows for formula
-    team_ga_map = {r["team_id"]: r.get("ga_pg", 0.0) for _, r in teams_df.iterrows()}
-    team_name_map = {r["team"]: r.get("ga_pg", 0.0) for _, r in teams_df.iterrows()}
-
-    def get_opp_ga_pg(row):
-        next_opp = team_next_opp.get(row.get("team", ""))
-        if not next_opp: return 0.0
-        opp_name = next_opp.get("opponent", "")
-        # Direct name match
-        if opp_name in team_name_map:
-            return safe_float(team_name_map[opp_name])
-        # Fuzzy match
-        for tname, ga in team_name_map.items():
-            if opp_name.lower() in tname.lower() or tname.lower() in opp_name.lower():
-                return safe_float(ga)
-        return 0.0
-
-    df["opp_ga_pg"] = df.apply(get_opp_ga_pg, axis=1)
 
     df["score"]  = df.apply(
         lambda r: combined_score(
