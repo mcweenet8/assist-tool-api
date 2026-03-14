@@ -621,6 +621,10 @@ async def run_scraper():
             rows = []
             for r in results:
                 if isinstance(r, list):
+                    # Remap stat_type from raw key to friendly GS name
+                    for row in r:
+                        raw = row.get("stat_type","")
+                        row["stat_type"] = GS_STATS.get(raw, raw)
                     rows.extend(r)
             log.info(f"  GS {league_name}: {len(rows)} rows")
             return rows
