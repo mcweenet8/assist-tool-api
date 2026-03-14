@@ -450,17 +450,27 @@ async def run_scraper():
 
     async with FotMob() as fotmob:
 
-        # Pass 1 — All standings in parallel
-        log.info("Pass 1: standings (parallel)...")
-        standing_tasks = [
-            get_standings(fotmob, league_name, info["id"])
-            for league_name, info in LEAGUES.items()
-        ]
-        standing_results = await asyncio.gather(*standing_tasks, return_exceptions=True)
+        # Pass 1 — Standings: European first (parallel), then others sequentially
+        log.info("Pass 1: standings...")
+        EURO_LEAGUES = {k: v for k, v in LEAGUES.items()
+                        if k not in ("MLS", "A-League Men")}
+        OTHER_LEAGUES = {k: v for k, v in LEAGUES.items()
+                         if k in ("MLS", "A-League Men")}
+
+        # European leagues in parallel
+        euro_tasks = [get_standings(fotmob, ln, info["id"])
+                      for ln, info in EURO_LEAGUES.items()]
+        euro_results = await asyncio.gather(*euro_tasks, return_exceptions=True)
         all_team_rows = []
-        for r in standing_results:
+        for r in euro_results:
             if isinstance(r, list):
                 all_team_rows.extend(r)
+
+        # MLS + A-League sequentially with extra delay
+        for ln, info in OTHER_LEAGUES.items():
+            await asyncio.sleep(3)
+            rows = await get_standings(fotmob, ln, info["id"])
+            all_team_rows.extend(rows)
 
         if not all_team_rows:
             raise RuntimeError("No standings data")
