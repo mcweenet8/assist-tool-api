@@ -107,13 +107,20 @@ async def get_standings(fotmob, league_name, league_id):
         data = await fotmob.standings(league_id)
         if not isinstance(data, list) or not data:
             return []
+        # Collect all team rows across all table items (handles MLS conferences)
+        all_team_rows_in_league = []
+        home_lkp_combined = {}
+        away_lkp_combined = {}
         for item in data:
             if not isinstance(item, dict): continue
             table    = item.get("data", {}).get("table", {})
             all_rows = table.get("all", [])
-            home_lkp = {str(t.get("id","")): t for t in table.get("home", []) if isinstance(t, dict)}
-            away_lkp = {str(t.get("id","")): t for t in table.get("away", []) if isinstance(t, dict)}
-            for team in all_rows:
+            home_lkp_combined.update({str(t.get("id","")): t for t in table.get("home", []) if isinstance(t, dict)})
+            away_lkp_combined.update({str(t.get("id","")): t for t in table.get("away", []) if isinstance(t, dict)})
+            all_team_rows_in_league.extend([t for t in all_rows if isinstance(t, dict)])
+        home_lkp = home_lkp_combined
+        away_lkp = away_lkp_combined
+        for team in all_team_rows_in_league:
                 if not isinstance(team, dict): continue
                 name   = (team.get("name") or team.get("shortName","")).strip()
                 tid    = str(team.get("id",""))
