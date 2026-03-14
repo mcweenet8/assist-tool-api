@@ -1209,6 +1209,110 @@ def lineups(match_id):
     return jsonify(result)
 
 
+# ── Live match stats endpoint ────────────────────────────────────────────────
+
+@app.route("/live/<match_id>")
+def live_match(match_id):
+    """Fetch live match events and stats from FotMob public endpoint."""
+    async def fetch():
+        url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=HEADERS,
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                return await resp.json(content_type=None)
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(fetch())
+        loop.close()
+
+        if "error" in data:
+            return jsonify(data), 503
+
+        content = data.get("content", {})
+        header  = data.get("header", {})
+        teams   = header.get("teams", [{}, {}])
+        home_id = str(teams[0].get("id","")) if teams else ""
+        away_id = str(teams[1].get("id","")) if len(teams) > 1 else ""
+
+        # Events
+        mf       = content.get("matchFacts", {})
+        raw_evts = mf.get("events", {})
+        evt_list = raw_evts.get("events", []) if isinstance(raw_evts, dict) else []
+
+        events = []
+        for e in evt_list:
+            etype = str(e.get("type","") or e.get("eventType","")).lower()
+            if not etype: continue
+            team_id = str(e.get("teamId","") or e.get("team",{}).get("id",""))
+            side    = "home" if team_id == home_id else "away"
+
+            if any(g in etype for g in ["goal","penalty"]) and "own" not in etype:
+                events.append({
+                    "type":    "goal",
+                    "minute":  e.get("timeStr") or e.get("min",""),
+                    "player":  e.get("playerName") or e.get("player",{}).get("name",""),
+                    "assist":  e.get("assistPlayerName") or e.get("assist",{}).get("name",""),
+                    "side":    side,
+                })
+            elif "owngoal" in etype or "own_goal" in etype:
+                events.append({
+                    "type":    "owngoal",
+                    "minute":  e.get("timeStr") or e.get("min",""),
+                    "player":  e.get("playerName") or e.get("player",{}).get("name",""),
+                    "side":    side,
+                })
+            elif "yellow" in etype or "card" in etype:
+                card = "red" if "red" in etype or e.get("isRed") else "yellow"
+                events.append({
+                    "type":    card,
+                    "minute":  e.get("timeStr") or e.get("min",""),
+                    "player":  e.get("playerName") or e.get("player",{}).get("name",""),
+                    "side":    side,
+                })
+            elif "sub" in etype or "substitut" in etype:
+                events.append({
+                    "type":    "sub",
+                    "minute":  e.get("timeStr") or e.get("min",""),
+                    "player":  e.get("playerName") or e.get("player",{}).get("name",""),
+                    "playerOut": e.get("playerOutName") or e.get("playerOut",{}).get("name",""),
+                    "side":    side,
+                })
+
+        # Stats
+        stats_raw = content.get("stats", {}).get("stats", [])
+        stats_out = {}
+        for group in stats_raw:
+            if not isinstance(group, dict): continue
+            for stat in group.get("stats", []):
+                if not isinstance(stat, dict): continue
+                title = stat.get("title","").lower()
+                vals  = stat.get("stats", stat.get("values", []))
+                if not vals or len(vals) < 2: continue
+                if "possession" in title:
+                    stats_out["possession"] = [safe_float(vals[0]), safe_float(vals[1])]
+                elif "shot" in title and "target" in title:
+                    stats_out["shots_on_target"] = [safe_float(vals[0]), safe_float(vals[1])]
+                elif "shot" in title and "target" not in title:
+                    stats_out["shots"] = [safe_float(vals[0]), safe_float(vals[1])]
+                elif "xg" in title or "expected goal" in title:
+                    stats_out["xg"] = [round(safe_float(vals[0]),2), round(safe_float(vals[1]),2)]
+
+        return jsonify({
+            "events": events,
+            "stats":  stats_out,
+            "minute": header.get("status",{}).get("liveTime",{}).get("short",""),
+            "score":  [teams[0].get("score",0) if teams else 0,
+                       teams[1].get("score",0) if len(teams)>1 else 0],
+        })
+    except Exception as e:
+        log.error(f"live_match {match_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Player detail endpoint ───────────────────────────────────────────────────
 
 @app.route("/player/<player_id>")
