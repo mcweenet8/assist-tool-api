@@ -1062,19 +1062,34 @@ async def af_fixture_id(home_team, away_team, match_date):
             fixtures = data.get("response", [])
             _fixtures_cache[date_str] = fixtures
             log.info(f"AF: fetched {len(fixtures)} fixtures for {date_str} (cached)")
-        home_lower = home_team.lower().replace(" fc","").replace(" cf","").strip()
-        away_lower = away_team.lower().replace(" fc","").replace(" cf","").strip()
+        def clean_name(s):
+            return (s.lower()
+                    .replace(" fc","").replace(" cf","").replace(" afc","")
+                    .replace("stade ","").replace(" 29","").replace(" sc","")
+                    .replace("manchester ","man ").replace("atletico ","atl ")
+                    .replace("athletic ","").replace("inter ","")
+                    .strip())
+        home_c = clean_name(home_team)
+        away_c = clean_name(away_team)
+        best_id = None
+        best_score = 0
         for f in fixtures:
-            h = f.get("teams",{}).get("home",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
-            a = f.get("teams",{}).get("away",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
+            h = clean_name(f.get("teams",{}).get("home",{}).get("name",""))
+            a = clean_name(f.get("teams",{}).get("away",{}).get("name",""))
             h_words = set(h.split())
             a_words = set(a.split())
-            home_words = set(home_lower.split())
-            away_words = set(away_lower.split())
-            if h_words & home_words and a_words & away_words:
-                fid = f.get("fixture",{}).get("id")
-                log.info(f"  MATCHED: {home_team} vs {away_team} → {fid}")
-                return fid
+            home_words = set(home_c.split())
+            away_words = set(away_c.split())
+            hs  = len(h_words & home_words)
+            as_ = len(a_words & away_words)
+            if not hs and (home_c in h or h in home_c): hs = 1
+            if not as_ and (away_c in a or a in away_c): as_ = 1
+            if hs > 0 and as_ > 0 and hs + as_ > best_score:
+                best_score = hs + as_
+                best_id = f.get("fixture",{}).get("id")
+        if best_id:
+            log.info(f"  MATCHED: {home_team} vs {away_team} → {best_id}")
+            return best_id
         log.warning(f"AF: no match for '{home_team}' vs '{away_team}' on {match_date[:10]}")
         return None
     except Exception as e:
