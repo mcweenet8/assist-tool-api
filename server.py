@@ -124,6 +124,7 @@ async def get_standings(fotmob, league_name, league_id):
             all_team_rows_in_league.extend([t for t in all_rows if isinstance(t, dict)])
         home_lkp = home_lkp_combined
         away_lkp = away_lkp_combined
+        log.info(f"standings {league_name}: {len(all_team_rows_in_league)} raw rows to process")
         for team in all_team_rows_in_league:
                 if not isinstance(team, dict): continue
                 name   = (team.get("name") or team.get("shortName","")).strip()
