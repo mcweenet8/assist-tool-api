@@ -103,9 +103,12 @@ def form_score(last5):
 async def get_standings(fotmob, league_name, league_id):
     await asyncio.sleep(1.5)
     rows = []
+    log.info(f"standings {league_name} (id={league_id}): fetching...")
     try:
         data = await fotmob.standings(league_id)
+        log.info(f"standings {league_name}: type={type(data).__name__} len={len(data) if isinstance(data,list) else str(data)[:50]}")
         if not isinstance(data, list) or not data:
+            log.warning(f"standings {league_name}: empty response")
             return []
         # Collect all team rows across all table items (handles MLS conferences)
         all_team_rows_in_league = []
@@ -175,7 +178,7 @@ async def get_standings(fotmob, league_name, league_id):
         else:
             log.info(f"standings {league_name}: {len(rows)} teams")
     except Exception as e:
-        log.error(f"standings {league_name}: {e}")
+        log.error(f"standings {league_name} EXCEPTION: {type(e).__name__}: {e}")
     return rows
 
 
