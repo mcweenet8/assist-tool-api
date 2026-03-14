@@ -8,7 +8,7 @@
 #   GET  /fixtures   — live + upcoming games next 7 days, by league
 # =============================================================================
 
-import asyncio, aiohttp, os, logging, requests
+import asyncio, aiohttp, os, logging
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -1039,16 +1039,18 @@ AF_LEAGUE_MAP = {
 
 _lineup_cache = {}  # match_key → {lineup, fetched_at}
 
-def af_fixture_id(home_team, away_team, match_date):
+async def af_fixture_id(home_team, away_team, match_date):
     """Find API-Football fixture ID by team names and date."""
     try:
         url = f"{AF_BASE}/fixtures"
         params = {"date": match_date[:10], "timezone": "UTC"}
-        resp = requests.get(url, headers=AF_HEADERS, params=params, timeout=10)
-        if resp.status_code != 200:
-            log.warning(f"AF fixtures: HTTP {resp.status_code}")
-            return None
-        data = resp.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=AF_HEADERS, params=params,
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    log.warning(f"AF fixtures: HTTP {resp.status}")
+                    return None
+                data = await resp.json(content_type=None)
         fixtures = data.get("response", [])
         log.info(f"AF: {len(fixtures)} fixtures on {match_date[:10]}")
         home_lower = home_team.lower().replace(" fc","").replace(" cf","").strip()
@@ -1056,15 +1058,14 @@ def af_fixture_id(home_team, away_team, match_date):
         for f in fixtures:
             h = f.get("teams",{}).get("home",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
             a = f.get("teams",{}).get("away",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
-            log.info(f"  AF fixture: {h} vs {a}")
-            # Word-level fuzzy match
+            log.info(f"  AF: {h} vs {a}")
             h_words = set(h.split())
             a_words = set(a.split())
             home_words = set(home_lower.split())
             away_words = set(away_lower.split())
             if h_words & home_words and a_words & away_words:
                 fid = f.get("fixture",{}).get("id")
-                log.info(f"  MATCHED: {home_team} vs {away_team} → fixture {fid}")
+                log.info(f"  MATCHED: {home_team} vs {away_team} → {fid}")
                 return fid
         log.warning(f"AF: no match for '{home_team}' vs '{away_team}' on {match_date[:10]}")
         return None
@@ -1073,26 +1074,26 @@ def af_fixture_id(home_team, away_team, match_date):
         return None
 
 
-def af_lineups(fixture_id):
+async def af_lineups(fixture_id):
     """Fetch confirmed lineups from API-Football."""
     try:
         url = f"{AF_BASE}/fixtures/lineups"
-        resp = requests.get(url, headers=AF_HEADERS,
-                           params={"fixture": fixture_id}, timeout=10)
-        if resp.status_code != 200:
-            log.warning(f"AF lineups: HTTP {resp.status_code}")
-            return None
-        data = resp.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=AF_HEADERS,
+                                   params={"fixture": fixture_id},
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    log.warning(f"AF lineups: HTTP {resp.status}")
+                    return None
+                data = await resp.json(content_type=None)
         teams = data.get("response", [])
         if not teams:
             return None
-
         result = {}
         for team_data in teams:
             team_name = team_data.get("team", {}).get("name", "")
             formation = team_data.get("formation", "")
             starters  = []
-            bench     = []
             for p in team_data.get("startXI", []):
                 player = p.get("player", {})
                 starters.append({
@@ -1101,6 +1102,7 @@ def af_lineups(fixture_id):
                     "pos":    player.get("pos", ""),
                     "grid":   player.get("grid", ""),
                 })
+            bench = []
             for p in team_data.get("substitutes", []):
                 player = p.get("player", {})
                 bench.append({
@@ -1108,11 +1110,7 @@ def af_lineups(fixture_id):
                     "number": player.get("number", ""),
                     "pos":    player.get("pos", ""),
                 })
-            result[team_name] = {
-                "formation": formation,
-                "starters":  starters,
-                "bench":     bench,
-            }
+            result[team_name] = {"formation": formation, "starters": starters, "bench": bench}
         return result if result else None
     except Exception as e:
         log.error(f"af_lineups {fixture_id}: {e}")
@@ -1140,12 +1138,15 @@ def lineups(match_id):
         return jsonify(cached)
 
     # Find API-Football fixture ID
-    fixture_id = af_fixture_id(home, away, kickoff)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    fixture_id = loop.run_until_complete(af_fixture_id(home, away, kickoff))
     if not fixture_id:
+        loop.close()
         return jsonify({"confirmed": False, "message": "Match not found on API-Football"}), 200
 
-    # Fetch lineups
-    lineup_data = af_lineups(fixture_id)
+    lineup_data = loop.run_until_complete(af_lineups(fixture_id))
+    loop.close()
     if not lineup_data:
         return jsonify({"confirmed": False,
                         "message": "Lineups not yet released",
