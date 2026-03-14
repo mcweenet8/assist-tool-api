@@ -116,12 +116,28 @@ async def get_standings(fotmob, league_name, league_id):
         away_lkp_combined = {}
         for item in data:
             if not isinstance(item, dict): continue
-            table    = item.get("data", {}).get("table", {})
-            # Try "all" first, then "data" for different league formats (e.g. MLS conferences)
-            all_rows = table.get("all", []) or table.get("data", [])
-            # Also try nested tables (MLS has Eastern/Western as separate items)
-            if not all_rows and isinstance(table, list):
-                all_rows = table
+            item_data = item.get("data", {})
+            table = item_data.get("table", {})
+
+            # Standard format
+            all_rows = table.get("all", [])
+
+            # MLS format: data.tables is a list of conference tables
+            if not all_rows:
+                tables_list = item_data.get("tables", [])
+                for t_item in tables_list:
+                    if isinstance(t_item, dict):
+                        sub_table = t_item.get("table", {})
+                        all_rows.extend(sub_table.get("all", []))
+                        home_lkp_combined.update({str(t.get("id","")): t for t in sub_table.get("home", []) if isinstance(t, dict)})
+                        away_lkp_combined.update({str(t.get("id","")): t for t in sub_table.get("away", []) if isinstance(t, dict)})
+
+            # Log MLS structure for debugging
+            if not all_rows and league_name == "MLS":
+                log.warning(f"MLS item_data keys: {list(item_data.keys())[:10]}")
+                tables_list = item_data.get("tables", [])
+                log.warning(f"MLS tables_list len: {len(tables_list)}, first keys: {list(tables_list[0].keys())[:5] if tables_list else 'empty'}")
+
             home_lkp_combined.update({str(t.get("id","")): t for t in table.get("home", []) if isinstance(t, dict)})
             away_lkp_combined.update({str(t.get("id","")): t for t in table.get("away", []) if isinstance(t, dict)})
             all_team_rows_in_league.extend([t for t in all_rows if isinstance(t, dict)])
