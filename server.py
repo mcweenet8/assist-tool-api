@@ -1398,15 +1398,15 @@ def lineups(match_id):
 
 @app.route("/live/<match_id>")
 def live_match(match_id):
-    """Fetch live match events and stats from FotMob public endpoint."""
+    """Fetch live match events and stats via fotmob wrapper (handles x-mas token)."""
     async def fetch():
-        url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=HEADERS,
-                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return {"error": f"HTTP {resp.status}"}
-                return await resp.json(content_type=None)
+        from fotmob import FotMob
+        fotmob = FotMob()
+        try:
+            return await fotmob.get_match(int(match_id))
+        except Exception as e:
+            log.error(f"fotmob.get_match {match_id}: {e}")
+            return {"error": str(e)}
 
     try:
         loop = asyncio.new_event_loop()
