@@ -444,6 +444,7 @@ async def run_scraper():
         if key not in agg:
             agg[key] = {
                 "player":          row["player"],
+                "player_id":       row["player_id"],
                 "team":            row["team"],
                 "team_id":         row["team_id"],
                 "league":          tlg.get(row["team_id"], ""),
@@ -495,9 +496,9 @@ async def run_scraper():
             "next_kickoff":     next_opp.get("kickoff")     if next_opp else None,
             "weak_opp_def":     next_opp.get("weak_def")    if next_opp else False,
             # Images
-            "player_id":        str(p.get("player_id", "") if hasattr(p, "get") else ""),
-            "player_img":       player_img_url(str(p.get("player_id", "") if hasattr(p, "get") else "")),
-            "team_logo":        team_logo_url(str(p.get("team_id", "") if hasattr(p, "get") else "")),
+            "player_id":        str(p.get("player_id", "")),
+            "player_img":       player_img_url(str(p.get("player_id", ""))),
+            "team_logo":        team_logo_url(str(p.get("team_id", ""))),
         }
 
     # Top 25
