@@ -84,11 +84,10 @@ def safe_float(v):
 
 def combined_score(xa_gap, cc_pg, big_chances, penalties_won, l5_xa=0.0):
     return round(
-        (xa_gap        * 0.30) +
-        (cc_pg         * 0.25) +
-        (big_chances   * 0.15) +
-        (penalties_won * 0.10) +
-        (l5_xa         * 0.20), 2)
+        (xa_gap        * 0.35) +
+        (cc_pg         * 0.30) +
+        (big_chances   * 0.20) +
+        (penalties_won * 0.15), 2)
 
 def form_score(last5):
     """Convert last 5 results to a 0-1 form score. W=1, D=0.5, L=0"""
