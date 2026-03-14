@@ -125,10 +125,13 @@ async def get_standings(fotmob, league_name, league_id):
             # MLS format: data.tables is a list of conference tables
             if not all_rows:
                 tables_list = item_data.get("tables", [])
-                for t_item in tables_list:
+                log.info(f"  {league_name} tables_list len: {len(tables_list)}")
+                for t_idx, t_item in enumerate(tables_list):
                     if isinstance(t_item, dict):
+                        log.info(f"  {league_name} table[{t_idx}] keys: {list(t_item.keys())[:8]}")
                         sub_table  = t_item.get("table", {})
-                        conf_name  = t_item.get("leagueName", t_item.get("name", ""))
+                        conf_name  = t_item.get("leagueName", t_item.get("name", t_item.get("title", "")))
+                        log.info(f"  {league_name} table[{t_idx}] conf_name='{conf_name}' all_len={len(sub_table.get('all',[]))}")
                         conf_teams = sub_table.get("all", [])
                         # Tag each team with their conference
                         for t in conf_teams:
@@ -988,6 +991,7 @@ def standings():
                 conf_sorted = sorted(conf_teams, key=lambda x: safe_float(x.get("table_pos", 99)))
                 key = f"MLS — {conf_name}" if conf_name != "Overall" else "MLS"
                 by_league[key] = [build_team_row(t) for t in conf_sorted]
+            log.info(f"MLS conferences in by_league: {[k for k in by_league if 'MLS' in k]}")
             continue
 
         lg_sorted = sorted(lg, key=lambda x: safe_float(x.get("table_pos", 99)))
