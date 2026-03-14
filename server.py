@@ -25,7 +25,7 @@ FORM_MATCHES    = 5     # last N matches for form
 
 LEAGUES = {
     "Premier League": {"id": 47,     "short": "PL"},
-    "Championship":   {"id": 48,     "short": "Champ",    "fixture_id": 48},
+    "Championship":   {"id": 48,     "short": "Champ",    "fixture_id": 900476},
     "La Liga":        {"id": 87,     "short": "LaLiga"},
     "Serie A":        {"id": 55,     "short": "SerieA"},
     "Bundesliga":     {"id": 54,     "short": "Bundesliga"},
