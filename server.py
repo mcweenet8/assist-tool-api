@@ -294,16 +294,21 @@ async def run_scraper():
     import pandas as pd
     from fotmob import FotMob
 
-    log.info("Scraper v2 starting...")
-    all_team_rows   = []
-    all_player_rows = []
+    log.info("Scraper v3 starting (fully parallel)...")
 
     async with FotMob() as fotmob:
 
-        # Pass 1 — Standings
-        for league_name, info in LEAGUES.items():
-            rows = await get_standings(fotmob, league_name, info["id"])
-            all_team_rows.extend(rows)
+        # Pass 1 — All standings in parallel
+        log.info("Pass 1: standings (parallel)...")
+        standing_tasks = [
+            get_standings(fotmob, league_name, info["id"])
+            for league_name, info in LEAGUES.items()
+        ]
+        standing_results = await asyncio.gather(*standing_tasks, return_exceptions=True)
+        all_team_rows = []
+        for r in standing_results:
+            if isinstance(r, list):
+                all_team_rows.extend(r)
 
         if not all_team_rows:
             raise RuntimeError("No standings data")
@@ -312,52 +317,98 @@ async def run_scraper():
         all_team_ids = set(str(tid) for tid in teams_df["team_id"].tolist())
         log.info(f"Standings: {len(teams_df)} teams")
 
-        # Pass 2 — Season IDs
-        league_seasons = {}
-        for league_name, info in LEAGUES.items():
+        # Pass 2 — All season IDs in parallel
+        log.info("Pass 2: season IDs (parallel)...")
+        async def fetch_season(league_name, info):
             lt = teams_df[teams_df["league"] == league_name]
-            if lt.empty: continue
-            await asyncio.sleep(0.8)
+            if lt.empty: return info["id"], None
             sid = await get_season_id(fotmob, lt.iloc[0]["team_id"])
-            if sid:
-                league_seasons[info["id"]] = sid
-                log.info(f"Season ID {league_name}: {sid}")
+            return info["id"], sid
 
-        # Pass 3 — Player stats
+        season_tasks    = [fetch_season(ln, info) for ln, info in LEAGUES.items()]
+        season_results  = await asyncio.gather(*season_tasks, return_exceptions=True)
+        league_seasons  = {}
+        for r in season_results:
+            if isinstance(r, tuple):
+                lid, sid = r
+                if sid:
+                    league_seasons[lid] = sid
+                    log.info(f"  Season {lid}: {sid}")
+
+        # Pass 3 — All player stats in parallel
+        log.info("Pass 3: player stats (parallel)...")
         fotmob_session = getattr(fotmob, "_session", None) or getattr(fotmob, "session", None)
         sess = fotmob_session or aiohttp.ClientSession()
 
-        for league_name, info in LEAGUES.items():
-            lid = info["id"]
-            sid = league_seasons.get(lid)
-            if not sid: continue
-            for stat_name in STATS:
-                await asyncio.sleep(0.3)
-                rows = await fetch_stat(sess, lid, sid, stat_name, all_team_ids)
-                all_player_rows.extend(rows)
-            log.info(f"Players fetched: {league_name}")
+        async def fetch_league_stats(league_name, info):
+            lid  = info["id"]
+            sid  = league_seasons.get(lid)
+            if not sid: return []
+            tasks = [
+                fetch_stat(sess, lid, sid, stat_name, all_team_ids)
+                for stat_name in STATS
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            rows = []
+            for r in results:
+                if isinstance(r, list):
+                    rows.extend(r)
+            log.info(f"  {league_name}: {len(rows)} player rows")
+            return rows
+
+        league_stat_tasks = [
+            fetch_league_stats(ln, info) for ln, info in LEAGUES.items()
+        ]
+        league_stat_results = await asyncio.gather(*league_stat_tasks, return_exceptions=True)
+        all_player_rows = []
+        for r in league_stat_results:
+            if isinstance(r, list):
+                all_player_rows.extend(r)
 
         if fotmob_session is None and sess:
             await sess.close()
 
-        # Pass 4 — Team form (last 5) + next opponent
-        log.info("Fetching team form + next opponent...")
+        # Pass 4 — Form + next opponent + fixtures all in parallel
+        log.info("Pass 4: form + opponents + fixtures (parallel)...")
+
+        async def fetch_team_context(team_row):
+            tid   = team_row["team_id"]
+            tname = team_row["team"]
+            try:
+                form = await get_team_form(fotmob, tid, tname)
+            except Exception as e:
+                log.error(f"form {tname}: {e}")
+                form = []
+            try:
+                opp, _ = await get_next_opponent(fotmob, tid, tname, teams_df)
+            except Exception as e:
+                log.error(f"next_opp {tname}: {e}")
+                opp = None
+            return tname, form, opp
+
+        context_tasks = [fetch_team_context(row) for _, row in teams_df.iterrows()]
+        # Run form/opponent + fixtures simultaneously
+        context_results, fixtures = await asyncio.gather(
+            asyncio.gather(*context_tasks, return_exceptions=True),
+            get_fixtures_for_dates(fotmob, days=7),
+            return_exceptions=True
+        )
+
         team_form     = {}
         team_next_opp = {}
-        for _, team in teams_df.iterrows():
-            tid   = team["team_id"]
-            tname = team["team"]
-            await asyncio.sleep(0.5)
-            form = await get_team_form(fotmob, tid, tname)
-            team_form[tname] = form
-            await asyncio.sleep(0.5)
-            opp, _ = await get_next_opponent(fotmob, tid, tname, teams_df)
-            team_next_opp[tname] = opp
-            log.info(f"  {tname}: form={form} opp={opp['opponent'] if opp else 'N/A'}")
+        if isinstance(context_results, (list, tuple)):
+            for result in context_results:
+                if isinstance(result, Exception):
+                    continue
+                tname, form, opp = result
+                team_form[tname]     = form
+                team_next_opp[tname] = opp
 
-        # Pass 5 — Fixtures
-        log.info("Fetching fixtures...")
-        fixtures = await get_fixtures_for_dates(fotmob, days=7)
+        if isinstance(fixtures, Exception):
+            log.error(f"fixtures failed: {fixtures}")
+            fixtures = {}
+
+        log.info(f"Form: {len(team_form)} teams | Fixtures: {sum(len(v) for v in fixtures.values())} matches")
 
     if not all_player_rows:
         raise RuntimeError("No player data")
@@ -475,10 +526,11 @@ CORS(app)
 @app.route("/status")
 def status():
     return jsonify({
-        "status":       _cache["status"],
-        "last_updated": _cache["last_updated"],
-        "top25_count":  len(_cache["top25"]),
-        "leagues":      list(_cache["by_league"].keys()),
+        "status":          _cache["status"],
+        "last_updated":    _cache["last_updated"],
+        "refresh_started": _cache.get("refresh_started"),
+        "top25_count":     len(_cache["top25"]),
+        "leagues":         list(_cache["by_league"].keys()),
     })
 
 @app.route("/data")
@@ -502,7 +554,8 @@ def fixtures():
 
 @app.route("/refresh", methods=["GET", "POST"])
 def refresh():
-    _cache["status"] = "refreshing"
+    _cache["status"]           = "refreshing"
+    _cache["refresh_started"]  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
