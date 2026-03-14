@@ -1140,6 +1140,49 @@ async def af_lineups(fixture_id):
         return None
 
 
+@app.route("/debug/stats/<league_id>/<season_id>")
+def debug_stats(league_id, season_id):
+    """Test which stats are available for a given league/season."""
+    GOAL_STATS_TO_TEST = [
+        "goals", "goals_per_90", "expected_goals", "expected_goals_per_90",
+        "expected_goalsontarget", "ontarget_scoring_att", "total_scoring_att",
+        "big_chance_missed", "penalty_scored", "penalty_won",
+    ]
+
+    async def fetch_all():
+        results = {}
+        async with aiohttp.ClientSession() as session:
+            for stat in GOAL_STATS_TO_TEST:
+                url = f"https://data.fotmob.com/stats/{league_id}/season/{season_id}/{stat}.json"
+                try:
+                    async with session.get(url, headers=HEADERS,
+                                          timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            top = data.get("TopLists", [{}])[0].get("StatList", [])
+                            sample = top[0] if top else {}
+                            results[stat] = {
+                                "available": True,
+                                "count": len(top),
+                                "sample_player": sample.get("ParticipantName",""),
+                                "sample_value": sample.get("StatValue",""),
+                            }
+                        else:
+                            results[stat] = {"available": False, "status": resp.status}
+                except Exception as e:
+                    results[stat] = {"available": False, "error": str(e)}
+        return results
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    results = loop.run_until_complete(fetch_all())
+    loop.close()
+
+    available = [s for s, v in results.items() if v.get("available")]
+    print(f"Available for {league_id}/{season_id}: {available}")
+    return jsonify({"available": available, "details": results})
+
+
 @app.route("/debug/fixtures/<date>")
 def debug_fixtures(date):
     """List all fixtures API-Football knows about for a date."""
