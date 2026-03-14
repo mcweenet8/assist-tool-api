@@ -1125,6 +1125,30 @@ async def af_lineups(fixture_id):
         return None
 
 
+@app.route("/debug/fixtures/<date>")
+def debug_fixtures(date):
+    """List all fixtures API-Football knows about for a date."""
+    async def fetch():
+        url = f"{AF_BASE}/fixtures"
+        params = {"date": date, "timezone": "UTC"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=AF_HEADERS, params=params,
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+        return [{"id": f["fixture"]["id"],
+                 "home": f["teams"]["home"]["name"],
+                 "away": f["teams"]["away"]["name"],
+                 "league": f["league"]["name"]}
+                for f in data.get("response", [])]
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    result = loop.run_until_complete(fetch())
+    loop.close()
+    return jsonify(result)
+
+
 @app.route("/lineups/<match_id>")
 def lineups(match_id):
     """Fetch confirmed lineups for a match via API-Football."""
