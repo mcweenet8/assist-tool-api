@@ -521,7 +521,10 @@ async def run_scraper():
         async def fetch_league_stats(league_name, info):
             lid  = info["id"]
             sid  = league_seasons.get(lid)
-            if not sid: return []
+            if not sid:
+                log.warning(f"Pass 3: {league_name} skipped — no season ID")
+                return []
+            log.info(f"Pass 3: fetching {league_name} (lid={lid} sid={sid})")
             tasks = [
                 fetch_stat(sess, lid, sid, stat_name, all_team_ids)
                 for stat_name in STATS
@@ -531,17 +534,30 @@ async def run_scraper():
             for r in results:
                 if isinstance(r, list):
                     rows.extend(r)
-            log.info(f"  {league_name}: {len(rows)} player rows")
+            if not rows:
+                log.warning(f"  {league_name}: 0 player rows — may not have stats on data.fotmob.com")
+            else:
+                log.info(f"  {league_name}: {len(rows)} player rows")
             return rows
 
+        # Fetch European + MLS stats in parallel, A-League after with delay
+        PRIORITY_LEAGUES = {k: v for k, v in LEAGUES.items() if k != "A-League Men"}
+        DELAYED_LEAGUES  = {k: v for k, v in LEAGUES.items() if k == "A-League Men"}
+
         league_stat_tasks = [
-            fetch_league_stats(ln, info) for ln, info in LEAGUES.items()
+            fetch_league_stats(ln, info) for ln, info in PRIORITY_LEAGUES.items()
         ]
         league_stat_results = await asyncio.gather(*league_stat_tasks, return_exceptions=True)
         all_player_rows = []
         for r in league_stat_results:
             if isinstance(r, list):
                 all_player_rows.extend(r)
+
+        # A-League after a brief pause
+        for ln, info in DELAYED_LEAGUES.items():
+            await asyncio.sleep(2)
+            rows = await fetch_league_stats(ln, info)
+            all_player_rows.extend(rows)
 
         if fotmob_session is None and sess:
             await sess.close()
@@ -715,7 +731,7 @@ async def run_scraper():
         for _, r in teams_df.iterrows()
     ]
 
-    log.info(f"Scraper done — {len(top25_list)} players, {len(by_league)} leagues")
+    log.info(f"Scraper done — {len(top25_list)} players, {len(by_league)} leagues: {list(by_league.keys())}")
     return top25_list, by_league, fixtures, all_players_list, teams_list
 
 
