@@ -8,7 +8,7 @@
 #   GET  /fixtures   — live + upcoming games next 7 days, by league
 # =============================================================================
 
-import asyncio, aiohttp, os, logging
+import asyncio, aiohttp, os, logging, requests
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
