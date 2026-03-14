@@ -84,12 +84,13 @@ def safe_float(v):
     except:
         return 0.0
 
-def combined_score(xa_gap, cc_pg, big_chances, penalties_won, l5_xa=0.0):
+def combined_score(xa_gap, cc_pg, big_chances, penalties_won, opp_ga_pg=0.0, l5_xa=0.0):
     return round(
-        (xa_gap        * 0.35) +
-        (cc_pg         * 0.30) +
-        (big_chances   * 0.20) +
-        (penalties_won * 0.15), 2)
+        (xa_gap        * 0.30) +
+        (cc_pg         * 0.25) +
+        (big_chances   * 0.15) +
+        (penalties_won * 0.10) +
+        (opp_ga_pg     * 0.20), 2)
 
 def form_score(last5):
     """Convert last 5 results to a 0-1 form score. W=1, D=0.5, L=0"""
@@ -666,11 +667,31 @@ async def run_scraper():
         if r["games"] > 0 and r["chances_created"] > 0
         else round(r["xa_per90"] * 3.5, 2), axis=1)
     df["xa_gap"] = (df["xa"] - df["assists"]).round(1)
+
+    # Join opponent GA/G into player rows for formula
+    team_ga_map = {r["team_id"]: r.get("ga_pg", 0.0) for _, r in teams_df.iterrows()}
+    team_name_map = {r["team"]: r.get("ga_pg", 0.0) for _, r in teams_df.iterrows()}
+
+    def get_opp_ga_pg(row):
+        next_opp = team_next_opp.get(row.get("team", ""))
+        if not next_opp: return 0.0
+        opp_name = next_opp.get("opponent", "")
+        # Direct name match
+        if opp_name in team_name_map:
+            return safe_float(team_name_map[opp_name])
+        # Fuzzy match
+        for tname, ga in team_name_map.items():
+            if opp_name.lower() in tname.lower() or tname.lower() in opp_name.lower():
+                return safe_float(ga)
+        return 0.0
+
+    df["opp_ga_pg"] = df.apply(get_opp_ga_pg, axis=1)
+
     df["score"]  = df.apply(
         lambda r: combined_score(
             r["xa_gap"], r["chances_per_game"],
             r["big_chances"], r["penalties_won"],
-            r.get("l5_xa", 0.0))
+            r.get("opp_ga_pg", 0.0))
         if (r["xa"] > 0 or r["chances_per_game"] > 0) else 0.0, axis=1)
 
     df = df[df["score"] > 0].sort_values("score", ascending=False).reset_index(drop=True)
@@ -691,7 +712,7 @@ async def run_scraper():
             "chances_per_game": round(float(p["chances_per_game"]), 2),
             "big_chances":      int(p["big_chances"]),
             "penalties_won":    int(p["penalties_won"]),
-            "l5_xa":            round(float(p.get("l5_xa", 0.0)), 2),
+            "opp_ga_pg":        round(float(p.get("opp_ga_pg", 0.0)), 2),
             # Form
             "form":             form,
             "form_score":       form_score(form),
