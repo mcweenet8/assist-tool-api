@@ -310,17 +310,18 @@ async def get_fixtures_for_dates(fotmob, days=7):
 # ── Player L5 xA fetcher ─────────────────────────────────────────────────────
 
 async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
-    """
-    Fetch last 5 matches for a player's team, extract their xA per game.
-    Returns list of {opponent, result, score, xa, date} dicts.
-    """
+    """Fetch last 5 matches for a player's team, extract their xA per game."""
     games = []
     try:
         fixtures = await fotmob.get_team_last_fixtures(int(team_id))
         matches  = fixtures if isinstance(fixtures, list) else []
         recent   = [m for m in matches if isinstance(m, dict)][-5:]
 
-        async with aiohttp.ClientSession() as session:
+        fotmob_session = getattr(fotmob, "_session", None) or getattr(fotmob, "session", None)
+
+        async with aiohttp.ClientSession() as fallback_session:
+            sess = fotmob_session or fallback_session
+
             for match in recent:
                 match_id = match.get("id") or match.get("matchId")
                 home     = match.get("home", {})
@@ -330,6 +331,7 @@ async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
                 opponent = away.get("name","") if is_home else home.get("name","")
                 h_score  = safe_float(home.get("score", -1))
                 a_score  = safe_float(away.get("score", -1))
+
                 if is_home:
                     result = "W" if h_score > a_score else "D" if h_score == a_score else "L"
                     score  = f"{int(h_score)}-{int(a_score)}"
@@ -339,100 +341,86 @@ async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
 
                 xa_val  = 0.0
                 minutes = 0
-                try:
-                    if match_id:
-                        # Use fotmob wrapper session for auth token
-                        fotmob_session = getattr(fotmob, "_session", None) or getattr(fotmob, "session", None)
-                        sess = fotmob_session or session
-                        url  = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
+
+                if match_id:
+                    try:
+                        url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
                         async with sess.get(url, headers=HEADERS,
-                                           timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                            if resp.status != 200:
-                                log.warning(f"  matchDetails {match_id}: HTTP {resp.status}")
-                                continue
-                            details = await resp.json(content_type=None)
+                                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                            if resp.status == 200:
+                                details = await resp.json(content_type=None)
+                                if isinstance(details, dict):
+                                    log.info(f"  match {match_id} keys: {list(details.keys())[:8]}")
 
-                        if not isinstance(details, dict):
-                            log.warning(f"  match {match_id}: details not a dict: {type(details)}")
-                            continue
-
-                        log.info(f"  match {match_id} keys: {list(details.keys())[:10]}")
-
-                        # Try multiple locations FotMob uses for player stats
-                        found_player = False
-
-                        # Method 1: lineup section
-                        lineup = details.get("lineup", {})
-                        for side in ["home", "away"]:
-                            side_data = lineup.get(side, {})
-                            all_players_in_lineup = []
-                            for group in side_data.get("players", []):
-                                if isinstance(group, list):
-                                    all_players_in_lineup.extend(group)
-                                elif isinstance(group, dict):
-                                    all_players_in_lineup.append(group)
-                            for p in all_players_in_lineup:
-                                if not isinstance(p, dict): continue
-                                pid = str(p.get("id","") or p.get("playerId",""))
-                                if pid == str(player_id):
-                                    found_player = True
-                                    log.info(f"  FOUND player {player_id}, keys: {list(p.keys())}")
-                                    stats = p.get("stats", p.get("stat", {}))
-                                    log.info(f"  stats: {str(stats)[:300]}")
                                     def find_xa(obj, depth=0):
-                                        if depth > 6: return 0.0
+                                        if depth > 6: return None
                                         if isinstance(obj, dict):
                                             for k, v in obj.items():
-                                                k_lower = str(k).lower().replace(" ","").replace("_","")
-                                                if k_lower in ("xa","expectedassists","xassists","expectedassist"):
+                                                kl = str(k).lower().replace(" ","").replace("_","")
+                                                if kl in ("xa","expectedassists","xassists","expectedassist"):
                                                     val = safe_float(v)
-                                                    if val >= 0: return val
+                                                    if val > 0: return val
                                             for v in obj.values():
                                                 r = find_xa(v, depth+1)
-                                                if r >= 0 and r != 0.0: return r
+                                                if r is not None: return r
                                         elif isinstance(obj, list):
                                             for item in obj:
                                                 r = find_xa(item, depth+1)
-                                                if r >= 0 and r != 0.0: return r
-                                        return 0.0
-                                    xa_val  = find_xa(stats)
-                                    minutes = safe_float(
-                                        p.get("minutesPlayed") or p.get("minutePlayed") or
-                                        p.get("timeSubbedIn") or p.get("time", {}).get("minutesPlayed", 0))
-                                    log.info(f"  xa_val={xa_val} minutes={minutes}")
+                                                if r is not None: return r
+                                        return None
 
-                        # Method 2: content > playerStats section
-                        if not found_player:
-                            content_data = details.get("content", {})
-                            player_stats = content_data.get("playerStats", {})
-                            log.info(f"  playerStats keys: {list(player_stats.keys())[:5]}")
-                            for side_key in ["home", "away"]:
-                                side_stats = player_stats.get(side_key, [])
-                                for ps in side_stats:
-                                    if not isinstance(ps, dict): continue
-                                    pid = str(ps.get("playerId","") or ps.get("id",""))
-                                    if pid == str(player_id):
-                                        found_player = True
-                                        log.info(f"  FOUND in playerStats: {str(ps)[:200]}")
-                                        xa_val = safe_float(
-                                            ps.get("expectedAssists") or ps.get("xA") or
-                                            ps.get("xa") or 0)
+                                    found = False
+                                    # Method 1: lineup
+                                    lineup = details.get("lineup", {})
+                                    for side in ["home", "away"]:
+                                        for group in lineup.get(side, {}).get("players", []):
+                                            players_list = group if isinstance(group, list) else [group]
+                                            for p in players_list:
+                                                if not isinstance(p, dict): continue
+                                                pid = str(p.get("id","") or p.get("playerId",""))
+                                                if pid == str(player_id):
+                                                    found = True
+                                                    stats = p.get("stats", p.get("stat", {}))
+                                                    log.info(f"  FOUND in lineup, stats: {str(stats)[:200]}")
+                                                    result_xa = find_xa(stats)
+                                                    xa_val  = result_xa if result_xa is not None else 0.0
+                                                    minutes = safe_float(
+                                                        p.get("minutesPlayed") or
+                                                        p.get("minutePlayed") or
+                                                        p.get("timeSubbedIn") or 0)
+                                                    log.info(f"  xa={xa_val} min={minutes}")
 
-                        if not found_player:
-                            log.warning(f"  player {player_id} NOT found in match {match_id}")
+                                    # Method 2: content.playerStats
+                                    if not found:
+                                        ps_data = details.get("content",{}).get("playerStats",{})
+                                        log.info(f"  playerStats keys: {list(ps_data.keys())[:5]}")
+                                        for side in ["home","away"]:
+                                            for ps in ps_data.get(side, []):
+                                                if not isinstance(ps, dict): continue
+                                                pid = str(ps.get("playerId","") or ps.get("id",""))
+                                                if pid == str(player_id):
+                                                    found = True
+                                                    log.info(f"  FOUND in playerStats: {str(ps)[:200]}")
+                                                    xa_val = safe_float(
+                                                        ps.get("expectedAssists") or
+                                                        ps.get("xA") or ps.get("xa") or 0)
 
-            except Exception as e:
-                log.warning(f"  match details {match_id}: {e}")
+                                    if not found:
+                                        log.warning(f"  player {player_id} not found in match {match_id}")
+                            else:
+                                log.warning(f"  matchDetails {match_id}: HTTP {resp.status}")
+                    except Exception as e:
+                        log.warning(f"  match {match_id} error: {e}")
 
-            utc = match.get("status", {}).get("utcTime", "") or match.get("utcTime", "")
-            games.append({
-                "opponent": opponent,
-                "result":   result,
-                "score":    score,
-                "xa":       xa_val,
-                "minutes":  int(minutes),
-                "date":     utc[:10] if utc else "",
-            })
+                utc = match.get("status", {}).get("utcTime", "") or match.get("utcTime", "")
+                games.append({
+                    "opponent": opponent,
+                    "result":   result,
+                    "score":    score,
+                    "xa":       xa_val,
+                    "minutes":  int(minutes),
+                    "date":     utc[:10] if utc else "",
+                })
     except Exception as e:
         log.error(f"player_l5 {player_name}: {e}")
 
