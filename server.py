@@ -1042,7 +1042,6 @@ _lineup_cache = {}  # match_key → {lineup, fetched_at}
 def af_fixture_id(home_team, away_team, match_date):
     """Find API-Football fixture ID by team names and date."""
     try:
-        # Search by date
         url = f"{AF_BASE}/fixtures"
         params = {"date": match_date[:10], "timezone": "UTC"}
         resp = requests.get(url, headers=AF_HEADERS, params=params, timeout=10)
@@ -1051,15 +1050,23 @@ def af_fixture_id(home_team, away_team, match_date):
             return None
         data = resp.json()
         fixtures = data.get("response", [])
-        home_lower = home_team.lower()
-        away_lower = away_team.lower()
+        log.info(f"AF: {len(fixtures)} fixtures on {match_date[:10]}")
+        home_lower = home_team.lower().replace(" fc","").replace(" cf","").strip()
+        away_lower = away_team.lower().replace(" fc","").replace(" cf","").strip()
         for f in fixtures:
-            h = f.get("teams",{}).get("home",{}).get("name","").lower()
-            a = f.get("teams",{}).get("away",{}).get("name","").lower()
-            # Fuzzy match
-            if (home_lower in h or h in home_lower) and                (away_lower in a or a in away_lower):
-                return f.get("fixture",{}).get("id")
-        log.warning(f"AF: no fixture found for {home_team} vs {away_team} on {match_date}")
+            h = f.get("teams",{}).get("home",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
+            a = f.get("teams",{}).get("away",{}).get("name","").lower().replace(" fc","").replace(" cf","").strip()
+            log.info(f"  AF fixture: {h} vs {a}")
+            # Word-level fuzzy match
+            h_words = set(h.split())
+            a_words = set(a.split())
+            home_words = set(home_lower.split())
+            away_words = set(away_lower.split())
+            if h_words & home_words and a_words & away_words:
+                fid = f.get("fixture",{}).get("id")
+                log.info(f"  MATCHED: {home_team} vs {away_team} → fixture {fid}")
+                return fid
+        log.warning(f"AF: no match for '{home_team}' vs '{away_team}' on {match_date[:10]}")
         return None
     except Exception as e:
         log.error(f"af_fixture_id: {e}")
