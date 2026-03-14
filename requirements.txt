@@ -4,3 +4,4 @@ aiohttp
 pandas
 gunicorn
 fotmob-wrapper
+requests
