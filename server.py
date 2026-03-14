@@ -343,38 +343,77 @@ async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
             try:
                 if match_id:
                     details = await fotmob.get_match_details(int(match_id))
-                    lineup  = details.get("lineup", {}) if isinstance(details, dict) else {}
+                    if not isinstance(details, dict):
+                        log.warning(f"  match {match_id}: details not a dict: {type(details)}")
+                        continue
+
+                    # Log top-level keys first time to understand structure
+                    log.info(f"  match {match_id} keys: {list(details.keys())[:10]}")
+
+                    # Try multiple locations FotMob uses for player stats
+                    found_player = False
+
+                    # Method 1: lineup section
+                    lineup = details.get("lineup", {})
                     for side in ["home", "away"]:
                         side_data = lineup.get(side, {})
+                        all_players_in_lineup = []
                         for group in side_data.get("players", []):
                             if isinstance(group, list):
-                                for p in group:
-                                    if not isinstance(p, dict): continue
-                                    pid = str(p.get("id", ""))
-                                    if pid == str(player_id):
-                                        # FotMob stats are nested — flatten and search
-                                        stats = p.get("stats", {})
-                                        def find_xa(obj, depth=0):
-                                            if depth > 5: return 0.0
-                                            if isinstance(obj, dict):
-                                                for k, v in obj.items():
-                                                    k_lower = str(k).lower()
-                                                    if k_lower in ("xa", "expected_assists", "expectedassists"):
-                                                        val = safe_float(v)
-                                                        if val > 0: return val
-                                                for v in obj.values():
-                                                    r = find_xa(v, depth+1)
-                                                    if r > 0: return r
-                                            elif isinstance(obj, list):
-                                                for item in obj:
-                                                    r = find_xa(item, depth+1)
-                                                    if r > 0: return r
-                                            return 0.0
-                                        xa_val  = find_xa(stats)
-                                        minutes = safe_float(
-                                            p.get("minutesPlayed") or
-                                            p.get("minutePlayed") or
-                                            p.get("timeSubbedIn") or 0)
+                                all_players_in_lineup.extend(group)
+                            elif isinstance(group, dict):
+                                all_players_in_lineup.append(group)
+                        for p in all_players_in_lineup:
+                            if not isinstance(p, dict): continue
+                            pid = str(p.get("id","") or p.get("playerId",""))
+                            if pid == str(player_id):
+                                found_player = True
+                                # Log raw player dict to see stat structure
+                                log.info(f"  FOUND player {player_id} in lineup, keys: {list(p.keys())}")
+                                stats = p.get("stats", p.get("stat", {}))
+                                log.info(f"  stats type: {type(stats)}, val: {str(stats)[:200]}")
+                                def find_xa(obj, depth=0):
+                                    if depth > 6: return 0.0
+                                    if isinstance(obj, dict):
+                                        for k, v in obj.items():
+                                            k_lower = str(k).lower().replace(" ","").replace("_","")
+                                            if k_lower in ("xa","expectedassists","xassists","expectedassist"):
+                                                val = safe_float(v)
+                                                if val >= 0: return val
+                                        for v in obj.values():
+                                            r = find_xa(v, depth+1)
+                                            if r >= 0 and r != 0.0: return r
+                                    elif isinstance(obj, list):
+                                        for item in obj:
+                                            r = find_xa(item, depth+1)
+                                            if r >= 0 and r != 0.0: return r
+                                    return 0.0
+                                xa_val  = find_xa(stats)
+                                minutes = safe_float(
+                                    p.get("minutesPlayed") or p.get("minutePlayed") or
+                                    p.get("timeSubbedIn") or p.get("time", {}).get("minutesPlayed", 0))
+                                log.info(f"  xa_val={xa_val} minutes={minutes}")
+
+                    # Method 2: content > playerStats section
+                    if not found_player:
+                        content_data = details.get("content", {})
+                        player_stats = content_data.get("playerStats", {})
+                        log.info(f"  trying playerStats section, keys: {list(player_stats.keys())[:5]}")
+                        for side_key in ["home", "away"]:
+                            side_stats = player_stats.get(side_key, [])
+                            for ps in side_stats:
+                                if not isinstance(ps, dict): continue
+                                pid = str(ps.get("playerId","") or ps.get("id",""))
+                                if pid == str(player_id):
+                                    found_player = True
+                                    log.info(f"  FOUND in playerStats: {str(ps)[:200]}")
+                                    xa_val = safe_float(
+                                        ps.get("expectedAssists") or ps.get("xA") or
+                                        ps.get("xa") or 0)
+
+                    if not found_player:
+                        log.warning(f"  player {player_id} NOT found in match {match_id}")
+
             except Exception as e:
                 log.warning(f"  match details {match_id}: {e}")
 
