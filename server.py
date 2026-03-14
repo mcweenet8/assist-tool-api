@@ -661,10 +661,12 @@ async def run_scraper():
             agg[key][st] = safe_float(row["stat_value"])
 
     df = pd.DataFrame(list(agg.values()))
+    # Use xa/xa_per90 to derive player minutes/90 denominator
+    # This matches FotMob's "chances created per 90" exactly
     df["chances_per_game"] = df.apply(
-        lambda r: round(r["chances_created"] / r["games"], 2)
-        if r["games"] > 0 and r["chances_created"] > 0
-        else round(r["xa_per90"] * 3.5, 2), axis=1)
+        lambda r: round(r["chances_created"] / (r["xa"] / r["xa_per90"]), 2)
+        if r["xa"] > 0 and r["xa_per90"] > 0 and r["chances_created"] > 0
+        else (round(r["xa_per90"] * 2.5, 2) if r["xa_per90"] > 0 else 0.0), axis=1)
     df["xa_gap"] = (df["xa"] - df["assists"]).round(1)
 
     df["score"]  = df.apply(
