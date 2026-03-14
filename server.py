@@ -312,8 +312,9 @@ async def get_next_opponent(fotmob, team_id, team_name, teams_df):
 async def get_fixtures_for_dates(fotmob, days=7):
     """Get live + upcoming fixtures for the next N days across all leagues."""
     fixtures_by_league = {ln: [] for ln in LEAGUES}
-    league_ids = set(str(info["id"]) for info in LEAGUES.values())
-    id_to_league = {str(info["id"]): ln for ln, info in LEAGUES.items()}
+    # Use fixture_id if defined (some leagues use different IDs for fixtures vs standings)
+    league_ids   = set(str(info.get("fixture_id", info["id"])) for info in LEAGUES.values())
+    id_to_league = {str(info.get("fixture_id", info["id"])): ln for ln, info in LEAGUES.items()}
 
     today = datetime.utcnow()
     # Include yesterday for recent results
