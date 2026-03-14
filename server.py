@@ -20,12 +20,12 @@ log = logging.getLogger(__name__)
 
 MIN_GOALS_PG    = 1.2
 MAX_PLAYERS     = 25
-WEAK_DEF_THRESH = 1.3   # GA/G above this = weak defence flag
+WEAK_DEF_THRESH = 1.5   # GA/G above this = weak defence flag
 FORM_MATCHES    = 5     # last N matches for form
 
 LEAGUES = {
     "Premier League": {"id": 47,     "short": "PL"},
-    "Championship":   {"id": 48,     "short": "Champ"},
+    "Championship":   {"id": 48,     "short": "Champ",    "fixture_id": 48},
     "La Liga":        {"id": 87,     "short": "LaLiga"},
     "Serie A":        {"id": 55,     "short": "SerieA"},
     "Bundesliga":     {"id": 54,     "short": "Bundesliga"},
