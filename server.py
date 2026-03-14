@@ -1,889 +1,659 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import {
-  View, Text, FlatList, TouchableOpacity, Modal,
-  TextInput, ActivityIndicator, StyleSheet, SafeAreaView,
-  ScrollView, StatusBar,
-} from 'react-native';
+# =============================================================================
+# ASSIST RESEARCH TOOL — RAILWAY SERVER v2
+# =============================================================================
+# Endpoints:
+#   GET  /status     — health check
+#   GET  /data       — cached player + team data (includes form + opponent flag)
+#   POST /refresh    — re-run full scraper
+#   GET  /fixtures   — live + upcoming games next 7 days, by league
+# =============================================================================
 
-// ── API URL ───────────────────────────────────────────────────────────────────
-const DEFAULT_API_URL = 'https://web-production-0e482.up.railway.app';
+import asyncio, aiohttp, os, logging
+from datetime import datetime, timedelta
+from flask import Flask, jsonify
+from flask_cors import CORS
 
-// ── Theme ─────────────────────────────────────────────────────────────────────
-const C = {
-  bg:        '#0D0F14',
-  surface:   '#161920',
-  card:      '#1C2030',
-  border:    '#252A3A',
-  accent:    '#F0B429',
-  accentDim: '#7A5C14',
-  green:     '#3DDC84',
-  red:       '#FF6B6B',
-  orange:    '#FF9500',
-  blue:      '#4A9EFF',
-  text:      '#F0F2F8',
-  muted:     '#6B7280',
-  sub:       '#9CA3AF',
-};
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-const scoreColor = (score) => {
-  if (score >= 3.0) return '#00BFFF';  // electric blue
-  if (score >= 2.0) return '#3DDC84';  // green
-  if (score >= 1.0) return '#F0B429';  // yellow
-  return '#FF6B6B';                    // red
-};
+# ── Config ────────────────────────────────────────────────────────────────────
 
-const shortLeague = (l) => ({
-  'Premier League': 'PL', 'Championship': 'CH',
-  'La Liga': 'ESP', 'Serie A': 'ITA',
-  'Bundesliga': 'GER', 'Ligue 1': 'FRA',
-}[l] || l?.slice(0, 3).toUpperCase());
+MIN_GOALS_PG    = 1.2
+MAX_PLAYERS     = 25
+WEAK_DEF_THRESH = 1.3   # GA/G above this = weak defence flag
+FORM_MATCHES    = 5     # last N matches for form
 
-const formatKickoff = (utcTime) => {
-  if (!utcTime) return '';
-  try {
-    const d = new Date(utcTime);
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
-    const isTomorrow = d.toDateString() === tomorrow.toDateString();
-    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    if (isToday)    return `Today ${time}`;
-    if (isTomorrow) return `Tomorrow ${time}`;
-    return `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} ${time}`;
-  } catch {
-    return utcTime;
-  }
-};
-
-const formDot = (result) => {
-  const colors = { w: C.green, d: C.orange, l: C.red };
-  return colors[result?.toLowerCase()] || C.muted;
-};
-
-// ── Form Pills ────────────────────────────────────────────────────────────────
-const FormPills = ({ form }) => {
-  if (!form || form.length === 0) return null;
-  return (
-    <View style={styles.formRow}>
-      {form.map((r, i) => (
-        <View key={i} style={[styles.formDot, { backgroundColor: formDot(r) }]} />
-      ))}
-    </View>
-  );
-};
-
-// ── Stat Row ──────────────────────────────────────────────────────────────────
-const StatRow = ({ label, value, highlight }) => (
-  <View style={styles.statRow}>
-    <Text style={styles.statLabel}>{label}</Text>
-    <Text style={[styles.statValue, highlight && { color: C.accent, fontWeight: '700' }]}>
-      {value}
-    </Text>
-  </View>
-);
-
-// ── Player Detail Modal ───────────────────────────────────────────────────────
-const PlayerModal = ({ player, onClose }) => {
-  if (!player) return null;
-  const gap = player.xa_gap >= 0 ? `+${player.xa_gap}` : `${player.xa_gap}`;
-  return (
-    <Modal transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalCard}>
-          <View style={styles.modalHeader}>
-            <View style={{ flex: 1, marginRight: 12 }}>
-              <Text style={styles.modalName}>{player.player}</Text>
-              <Text style={styles.modalSub}>
-                {player.team}  ·  {shortLeague(player.league)}
-              </Text>
-              {player.form && player.form.length > 0 && (
-                <View style={{ marginTop: 6 }}>
-                  <FormPills form={player.form} />
-                </View>
-              )}
-            </View>
-            <View style={styles.scoreBadgeLarge}>
-              <Text style={[styles.scoreBadgeText, { color: scoreColor(player.score) }]}>
-                {player.score.toFixed(2)}
-              </Text>
-            </View>
-          </View>
-
-          {/* Next opponent */}
-          {player.next_opponent && (
-            <View style={[styles.nextOppRow,
-              player.weak_opp_def && styles.nextOppRowWeak]}>
-              <Text style={styles.nextOppLabel}>Next: </Text>
-              <Text style={styles.nextOppTeam}>{player.next_opponent}</Text>
-              {player.weak_opp_def && (
-                <Text style={styles.weakBadge}> 🛡️ Weak</Text>
-              )}
-              {player.next_kickoff && (
-                <Text style={styles.nextOppTime}>
-                  {' · '}{formatKickoff(player.next_kickoff)}
-                </Text>
-              )}
-            </View>
-          )}
-
-          <View style={styles.divider} />
-
-          <Text style={styles.sectionLabel}>FORMULA BREAKDOWN</Text>
-          <StatRow label="xA Gap  (×0.35)"     value={gap}                             highlight={player.xa_gap > 0} />
-          <StatRow label="CC/Game (×0.30)"      value={player.chances_per_game.toFixed(2)} />
-          <StatRow label="Big Chances (×0.20)"  value={player.big_chances} />
-          <StatRow label="Penalties Won (×0.15)"value={player.penalties_won} />
-
-          <View style={styles.divider} />
-
-          <Text style={styles.sectionLabel}>RAW STATS</Text>
-          <StatRow label="Assists"  value={player.assists} />
-          <StatRow label="xA"       value={player.xa.toFixed(2)} />
-          <StatRow label="xA Gap"   value={gap} highlight={player.xa_gap > 0} />
-          {player.form_score != null && (
-            <StatRow label="Form (last 5)" value={`${(player.form_score * 100).toFixed(0)}%`} />
-          )}
-
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-            <Text style={styles.closeBtnText}>Close</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
-};
-
-// ── Player Row ────────────────────────────────────────────────────────────────
-const PlayerRow = ({ player, rank, onPress }) => (
-  <TouchableOpacity style={styles.playerRow} onPress={() => onPress(player)}>
-    <Text style={styles.rank}>{rank}</Text>
-    <View style={styles.playerInfo}>
-      <View style={styles.playerNameRow}>
-        <Text style={styles.playerName} numberOfLines={1}>{player.player}</Text>
-        {player.weak_opp_def && <Text style={styles.weakIcon}>🛡️</Text>}
-      </View>
-      <View style={styles.playerMetaRow}>
-        <Text style={styles.playerSub}>{player.team}  ·  {shortLeague(player.league)}</Text>
-        {player.form && player.form.length > 0 && <FormPills form={player.form} />}
-      </View>
-    </View>
-    <Text style={[styles.score, { color: scoreColor(player.score) }]}>
-      {player.score.toFixed(2)}
-    </Text>
-  </TouchableOpacity>
-);
-
-// ── Fixture Card ──────────────────────────────────────────────────────────────
-const FixtureCard = ({ match, onPress }) => {
-  const isLive     = match.live;
-  const isFinished = match.finished;
-  return (
-    <TouchableOpacity
-      style={[styles.fixtureCard, isLive && styles.fixtureCardLive]}
-      onPress={() => onPress && onPress(match)}
-      activeOpacity={0.75}>
-      {isLive && (
-        <View style={styles.liveBadge}>
-          <Text style={styles.liveBadgeText}>● LIVE {match.minute}</Text>
-        </View>
-      )}
-      <View style={styles.fixtureTeams}>
-        <Text style={styles.fixtureTeam} numberOfLines={1}>{match.home}</Text>
-        <View style={styles.fixtureScoreBox}>
-          {(isLive || isFinished) && match.score
-            ? <Text style={styles.fixtureScore}>{match.score}</Text>
-            : <Text style={styles.fixtureTime}>{formatKickoff(match.kickoff)}</Text>
-          }
-        </View>
-        <Text style={[styles.fixtureTeam, styles.fixtureTeamRight]} numberOfLines={1}>
-          {match.away}
-        </Text>
-      </View>
-    </TouchableOpacity>
-  );
-};
-
-// ── Match Screen (full screen) ───────────────────────────────────────────────
-const MatchScreen = ({ match, apiUrl, top25, onClose }) => {
-  const [data, setData]       = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState(null);
-
-  const base = apiUrl.replace(/\/$/, '');
-
-  useEffect(() => {
-    const fetchMatch = async () => {
-      setLoading(true);
-      try {
-        const params = new URLSearchParams({
-          home_id:  match.home_id,
-          away_id:  match.away_id,
-          home:     match.home,
-          away:     match.away,
-          live:     match.live     ? 'true' : 'false',
-          finished: match.finished ? 'true' : 'false',
-        });
-        const res  = await fetch(`${base}/match/${match.match_id}?${params}`);
-        const json = await res.json();
-        if (json.error) throw new Error(json.error);
-        setData(json);
-      } catch (e) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchMatch();
-  }, [match.match_id]);
-
-  const isLive     = match.live;
-  const isFinished = match.finished;
-
-  const PlayerSquadRow = ({ p, side }) => {
-    const gap = p.xa_gap >= 0 ? `+${p.xa_gap}` : `${p.xa_gap}`;
-    return (
-      <View style={[styles.squadRow, p.in_top25 && styles.squadRowHighlight]}>
-        <View style={styles.squadPlayerInfo}>
-          <View style={styles.squadNameRow}>
-            {p.in_top25 && <Text style={styles.starBadge}>★ </Text>}
-            <Text style={[styles.squadPlayerName,
-              p.in_top25 && styles.squadPlayerNameHighlight]}
-              numberOfLines={1}>
-              {p.player}
-            </Text>
-            {p.weak_opp && <Text style={styles.weakIconSmall}> 🛡️</Text>}
-          </View>
-          <Text style={styles.squadPlayerSub}>
-            {`xA Gap ${gap}  ·  CC/G ${p.chances_per_game?.toFixed(2)}  ·  BC ${p.big_chances}`}
-          </Text>
-        </View>
-        <Text style={[styles.squadScore, { color: scoreColor(p.score) }]}>
-          {p.score?.toFixed(2)}
-        </Text>
-      </View>
-    );
-  };
-
-  const LineupSection = ({ title, players }) => {
-    if (!players || players.length === 0) return null;
-    return (
-      <View style={styles.lineupSection}>
-        <Text style={styles.sectionLabel}>{title}</Text>
-        <View style={styles.lineupGrid}>
-          {players.map((p, i) => (
-            <View key={i} style={[styles.lineupPill,
-              p.in_top25 && styles.lineupPillHighlight]}>
-              <Text style={[styles.lineupName,
-                p.in_top25 && styles.lineupNameHighlight]}
-                numberOfLines={1}>
-                {p.in_top25 ? `★ ${p.name}` : p.name}
-              </Text>
-            </View>
-          ))}
-        </View>
-      </View>
-    );
-  };
-
-  return (
-    <Modal animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={styles.safe}>
-        <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-
-        {/* Header */}
-        <View style={styles.matchHeader}>
-          <TouchableOpacity onPress={onClose} style={styles.backBtn}>
-            <Text style={styles.backBtnText}>← Back</Text>
-          </TouchableOpacity>
-          {isLive && (
-            <View style={styles.livePill}>
-              <Text style={styles.livePillText}>● LIVE {match.minute}</Text>
-            </View>
-          )}
-        </View>
-
-        {/* Score bar */}
-        <View style={styles.scoreBar}>
-          <Text style={styles.scoreTeam} numberOfLines={2}>{match.home}</Text>
-          <View style={styles.scoreCenter}>
-            {(isLive || isFinished) && match.score
-              ? <Text style={styles.scoreLarge}>{match.score}</Text>
-              : <Text style={styles.scoreVs}>vs</Text>}
-            <Text style={styles.scoreKickoff}>{formatKickoff(match.kickoff)}</Text>
-          </View>
-          <Text style={[styles.scoreTeam, styles.scoreTeamRight]} numberOfLines={2}>
-            {match.away}
-          </Text>
-        </View>
-
-        {/* Weak def banners */}
-        {data && (
-          <View style={styles.weakDefRow}>
-            {data.away_weak_def && (
-              <View style={styles.weakDefBanner}>
-                <Text style={styles.weakDefText}>🛡️ {match.away} weak defence</Text>
-              </View>
-            )}
-            {data.home_weak_def && (
-              <View style={styles.weakDefBanner}>
-                <Text style={styles.weakDefText}>🛡️ {match.home} weak defence</Text>
-              </View>
-            )}
-          </View>
-        )}
-
-        {loading && (
-          <View style={styles.center}>
-            <ActivityIndicator size="large" color={C.accent} />
-            <Text style={[styles.emptySub, { marginTop: 12 }]}>
-              {isLive ? 'Loading live data...' : 'Loading squad data...'}
-            </Text>
-          </View>
-        )}
-
-        {error && (
-          <View style={styles.center}>
-            <Text style={styles.errorText}>⚠ {error}</Text>
-          </View>
-        )}
-
-        {data && !loading && (
-          <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
-
-            {/* Live lineups if available */}
-            {data.lineups && (
-              <>
-                <LineupSection
-                  title={`${match.home.toUpperCase()} LINEUP`}
-                  players={data.lineups.home}
-                />
-                <LineupSection
-                  title={`${match.away.toUpperCase()} LINEUP`}
-                  players={data.lineups.away}
-                />
-                <View style={styles.divider} />
-              </>
-            )}
-
-            {/* Home squad players */}
-            {data.home_players?.length > 0 && (
-              <>
-                <Text style={styles.squadHeader}>
-                  {match.home.toUpperCase()}
-                  {data.away_weak_def ? '  🛡️ Weak opp' : ''}
-                </Text>
-                {data.home_players.slice(0, 8).map((p, i) => (
-                  <PlayerSquadRow key={i} p={p} side="home" />
-                ))}
-              </>
-            )}
-
-            {/* Away squad players */}
-            {data.away_players?.length > 0 && (
-              <>
-                <Text style={[styles.squadHeader, { marginTop: 8 }]}>
-                  {match.away.toUpperCase()}
-                  {data.home_weak_def ? '  🛡️ Weak opp' : ''}
-                </Text>
-                {data.away_players.slice(0, 8).map((p, i) => (
-                  <PlayerSquadRow key={i} p={p} side="away" />
-                ))}
-              </>
-            )}
-
-            {data.home_players?.length === 0 && data.away_players?.length === 0 && (
-              <View style={styles.center}>
-                <Text style={styles.emptyText}>No player data for these teams</Text>
-                <Text style={styles.emptySub}>
-                  These teams may not be in your tracked leagues
-                </Text>
-              </View>
-            )}
-          </ScrollView>
-        )}
-      </SafeAreaView>
-    </Modal>
-  );
-};
-
-// ── Fixtures Tab ──────────────────────────────────────────────────────────────
-const FixturesTab = ({ fixtures, loading, onLoad, onMatchPress }) => {
-  if (loading) return (
-    <View style={styles.center}>
-      <ActivityIndicator size="large" color={C.accent} />
-    </View>
-  );
-  if (!fixtures || Object.keys(fixtures).length === 0) return (
-    <View style={styles.center}>
-      <Text style={styles.emptyIcon}>📅</Text>
-      <Text style={styles.emptyText}>No fixtures loaded</Text>
-      <TouchableOpacity style={styles.loadBtn} onPress={onLoad}>
-        <Text style={styles.loadBtnText}>Load Fixtures</Text>
-      </TouchableOpacity>
-    </View>
-  );
-
-  // Flatten + sort all matches by kickoff, group live first
-  const allMatches = [];
-  Object.entries(fixtures).forEach(([league, matches]) => {
-    matches.forEach(m => allMatches.push({ ...m, league }));
-  });
-
-  const live     = allMatches.filter(m => m.live);
-  const upcoming = allMatches.filter(m => !m.live && !m.finished)
-                             .sort((a,b) => (a.kickoff||'').localeCompare(b.kickoff||''));
-  const finished = allMatches.filter(m => m.finished)
-                             .sort((a,b) => (b.kickoff||'').localeCompare(a.kickoff||''));
-
-  const sections = [];
-  if (live.length > 0)     sections.push({ title: '🔴 LIVE', data: live });
-  if (upcoming.length > 0) sections.push({ title: 'UPCOMING', data: upcoming });
-  if (finished.length > 0) sections.push({ title: 'RESULTS', data: finished });
-
-  return (
-    <ScrollView style={styles.flex} contentContainerStyle={{ paddingBottom: 40 }}>
-      {sections.map(({ title, data }) => (
-        <View key={title}>
-          <Text style={styles.fixturesSectionHeader}>{title}</Text>
-          {data.map((match, i) => (
-            <View key={match.match_id || i}>
-              <Text style={styles.fixtureLeagueLabel}>{shortLeague(match.league)}</Text>
-              <FixtureCard match={match} onPress={onMatchPress} />
-            </View>
-          ))}
-        </View>
-      ))}
-    </ScrollView>
-  );
-};
-
-// ── League Drill-Down ─────────────────────────────────────────────────────────
-const LeagueView = ({ byLeague, onPlayerPress }) => {
-  const [openLeague, setOpenLeague] = useState(null);
-  const [openTeam,   setOpenTeam]   = useState(null);
-  return (
-    <ScrollView style={styles.flex} contentContainerStyle={{ paddingBottom: 40 }}>
-      {Object.entries(byLeague).map(([league, teams]) => (
-        <View key={league}>
-          <TouchableOpacity
-            style={styles.leagueHeader}
-            onPress={() => setOpenLeague(openLeague === league ? null : league)}>
-            <Text style={styles.leagueTitle}>{league}</Text>
-            <Text style={styles.chevron}>{openLeague === league ? '▲' : '▼'}</Text>
-          </TouchableOpacity>
-          {openLeague === league && teams.map(({ team, players }) => (
-            <View key={team}>
-              <TouchableOpacity
-                style={styles.teamHeader}
-                onPress={() => setOpenTeam(openTeam === team ? null : team)}>
-                <Text style={styles.teamTitle}>{team}</Text>
-                <Text style={styles.teamCount}>
-                  {players.length} players  {openTeam === team ? '▲' : '▼'}
-                </Text>
-              </TouchableOpacity>
-              {openTeam === team && players.map((p, i) => (
-                <PlayerRow key={p.player+i} player={p} rank={i+1} onPress={onPlayerPress} />
-              ))}
-            </View>
-          ))}
-        </View>
-      ))}
-    </ScrollView>
-  );
-};
-
-// ── Main App ──────────────────────────────────────────────────────────────────
-export default function App() {
-  const [apiUrl,   setApiUrl]   = useState(DEFAULT_API_URL);
-  const [tab,      setTab]      = useState('fixtures');
-  const [data,     setData]     = useState(null);
-  const [fixtures, setFixtures] = useState(null);
-  const [loading,  setLoading]  = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error,    setError]    = useState(null);
-  const [selectedPlayer, setSelectedPlayer] = useState(null);
-  const [selectedMatch,  setSelectedMatch]  = useState(null);
-  const [urlInput, setUrlInput] = useState(DEFAULT_API_URL);
-
-  const base = apiUrl.replace(/\/$/, '');
-
-  const loadData = useCallback(async () => {
-    setLoading(true); setError(null);
-    try {
-      const res  = await fetch(`${base}/data`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      setData(json);
-    } catch (e) { setError(e.message); }
-    finally { setLoading(false); }
-  }, [base]);
-
-  const loadFixtures = useCallback(async () => {
-    setLoading(true); setError(null);
-    try {
-      const controller = new AbortController();
-      const timeout    = setTimeout(() => controller.abort(), 8000);
-      const res  = await fetch(`${base}/fixtures`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      // If cache empty just show empty state
-      if (json.error) { setFixtures({}); setLoading(false); return; }
-      setFixtures(json.fixtures || {});
-    } catch (e) {
-      setFixtures({});
-      if (e.name !== 'AbortError') setError('Fixtures unavailable — hit Refresh');
-    }
-    finally { setLoading(false); }
-  }, [base]);
-
-  const runRefresh = useCallback(async () => {
-    setRefreshing(true); setError(null);
-    try {
-      const res  = await fetch(`${base}/refresh`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error || 'Refresh failed');
-      setData(json);
-      // Also reload fixtures
-      await loadFixtures();
-    } catch (e) { setError(e.message); }
-    finally { setRefreshing(false); }
-  }, [base, loadFixtures]);
-
-  // Auto-load fixtures on mount
-  useEffect(() => { loadFixtures(); }, []);
-
-  const hasData = data && data.top25?.length > 0;
-
-  return (
-    <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-
-      {/* Header */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>ASSIST TOOL</Text>
-          {data?.last_updated && (
-            <Text style={styles.headerSub}>Updated {data.last_updated}</Text>
-          )}
-        </View>
-        <TouchableOpacity
-          style={[styles.refreshBtn, refreshing && styles.refreshBtnActive]}
-          onPress={runRefresh}
-          disabled={refreshing}>
-          {refreshing
-            ? <ActivityIndicator size="small" color={C.bg} />
-            : <Text style={styles.refreshBtnText}>⟳  Refresh</Text>}
-        </TouchableOpacity>
-      </View>
-
-      {error && (
-        <View style={styles.errorBar}>
-          <Text style={styles.errorText}>⚠  {error}</Text>
-        </View>
-      )}
-
-      {/* Tabs */}
-      <View style={styles.tabs}>
-        {[['fixtures','Fixtures'],['top25','Top 25'],['leagues','By League'],['settings','Settings']].map(([key, label]) => (
-          <TouchableOpacity
-            key={key}
-            style={[styles.tab, tab === key && styles.tabActive]}
-            onPress={() => {
-              setTab(key);
-              if (key === 'fixtures' && !fixtures) loadFixtures();
-              if ((key === 'top25' || key === 'leagues') && !hasData) loadData();
-            }}>
-            <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>
-              {label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {/* Content */}
-      {tab === 'fixtures' && (
-        <FixturesTab
-          fixtures={fixtures}
-          loading={loading}
-          onLoad={loadFixtures}
-          onMatchPress={setSelectedMatch}
-        />
-      )}
-
-      {tab === 'top25' && (
-        loading
-          ? <View style={styles.center}><ActivityIndicator size="large" color={C.accent} /></View>
-          : !hasData
-            ? <View style={styles.center}>
-                <Text style={styles.emptyIcon}>📊</Text>
-                <Text style={styles.emptyText}>No data yet</Text>
-                <Text style={styles.emptySub}>Hit Refresh to load player rankings</Text>
-                <TouchableOpacity style={styles.loadBtn} onPress={loadData}>
-                  <Text style={styles.loadBtnText}>Load Cached Data</Text>
-                </TouchableOpacity>
-              </View>
-            : <FlatList
-                data={data.top25}
-                keyExtractor={(p,i) => p.player+i}
-                renderItem={({ item, index }) => (
-                  <PlayerRow player={item} rank={index+1} onPress={setSelectedPlayer} />
-                )}
-                contentContainerStyle={{ paddingBottom: 40 }}
-                ListHeaderComponent={
-                  <View>
-                    <Text style={styles.listHeader}>TOP {data.top25?.length} — CROSS LEAGUE</Text>
-                    <View style={styles.legendRow}>
-                      <Text style={styles.legendItem}>🛡️ Weak opp defence</Text>
-                      <View style={styles.legendDots}>
-                        <View style={[styles.formDot, { backgroundColor: C.green }]} />
-                        <View style={[styles.formDot, { backgroundColor: C.orange }]} />
-                        <View style={[styles.formDot, { backgroundColor: C.red }]} />
-                        <Text style={styles.legendLabel}> W/D/L</Text>
-                      </View>
-                    </View>
-                  </View>
-                }
-              />
-      )}
-
-      {tab === 'leagues' && (
-        loading
-          ? <View style={styles.center}><ActivityIndicator size="large" color={C.accent} /></View>
-          : !hasData
-            ? <View style={styles.center}>
-                <Text style={styles.emptyText}>No data yet</Text>
-                <TouchableOpacity style={styles.loadBtn} onPress={loadData}>
-                  <Text style={styles.loadBtnText}>Load Cached Data</Text>
-                </TouchableOpacity>
-              </View>
-            : <LeagueView byLeague={data.by_league || {}} onPlayerPress={setSelectedPlayer} />
-      )}
-
-      {tab === 'settings' && (
-        <ScrollView style={styles.flex} contentContainerStyle={styles.settingsContent}>
-          <Text style={styles.settingsLabel}>API URL</Text>
-          <Text style={styles.settingsHint}>Paste your Railway URL here. No trailing slash.</Text>
-          <TextInput
-            style={styles.urlInput}
-            value={urlInput}
-            onChangeText={setUrlInput}
-            placeholder="https://xxxx.up.railway.app"
-            placeholderTextColor={C.muted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TouchableOpacity
-            style={styles.saveBtn}
-            onPress={() => { setApiUrl(urlInput.trim()); setData(null); setFixtures(null); setError(null); }}>
-            <Text style={styles.saveBtnText}>Save & Reconnect</Text>
-          </TouchableOpacity>
-          <View style={styles.divider} />
-          <Text style={styles.settingsLabel}>FORMULA</Text>
-          {[['xA Gap','×0.35'],['CC / Game','×0.30'],['Big Chances','×0.20'],['Penalties Won','×0.15']].map(([l,w]) => (
-            <View key={l} style={styles.formulaRow}>
-              <Text style={styles.formulaLabel}>{l}</Text>
-              <Text style={styles.formulaWeight}>{w}</Text>
-            </View>
-          ))}
-          <View style={styles.divider} />
-          <Text style={styles.settingsLabel}>FLAGS</Text>
-          <View style={styles.formulaRow}>
-            <Text style={styles.formulaLabel}>🛡️ Weak defence threshold</Text>
-            <Text style={styles.formulaWeight}>GA/G ≥ 1.3</Text>
-          </View>
-        </ScrollView>
-      )}
-
-      <PlayerModal player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
-      {selectedMatch && (
-        <MatchScreen
-          match={selectedMatch}
-          apiUrl={apiUrl}
-          top25={data?.top25 || []}
-          onClose={() => setSelectedMatch(null)}
-        />
-      )}
-    </SafeAreaView>
-  );
+LEAGUES = {
+    "Premier League": {"id": 47, "short": "PL"},
+    "Championship":   {"id": 48, "short": "Champ"},
+    "La Liga":        {"id": 87, "short": "LaLiga"},
+    "Serie A":        {"id": 55, "short": "SerieA"},
+    "Bundesliga":     {"id": 54, "short": "Bundesliga"},
+    "Ligue 1":        {"id": 53, "short": "Ligue1"},
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  safe:              { flex: 1, backgroundColor: C.bg },
-  flex:              { flex: 1 },
-  header:            { flexDirection: 'row', justifyContent: 'space-between',
-                       alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12,
-                       borderBottomWidth: 1, borderBottomColor: C.border },
-  headerTitle:       { color: C.accent, fontSize: 18, fontWeight: '800', letterSpacing: 2 },
-  headerSub:         { color: C.muted, fontSize: 11, marginTop: 2 },
-  refreshBtn:        { backgroundColor: C.accent, paddingHorizontal: 16,
-                       paddingVertical: 8, borderRadius: 8 },
-  refreshBtnActive:  { backgroundColor: C.accentDim },
-  refreshBtnText:    { color: C.bg, fontWeight: '700', fontSize: 14 },
-  errorBar:          { backgroundColor: '#3D1515', padding: 10, paddingHorizontal: 16 },
-  errorText:         { color: C.red, fontSize: 13 },
-  tabs:              { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: C.border },
-  tab:               { flex: 1, paddingVertical: 10, alignItems: 'center' },
-  tabActive:         { borderBottomWidth: 2, borderBottomColor: C.accent },
-  tabText:           { color: C.muted, fontSize: 12, fontWeight: '600' },
-  tabTextActive:     { color: C.accent },
+STATS = {
+    "goal_assist":             "assists",
+    "expected_assists":        "xa",
+    "big_chance_created":      "big_chances",
+    "total_att_assist":        "chances_created",
+    "expected_assists_per_90": "xa_per90",
+    "penalty_won":             "penalties_won",
+}
 
-  // Fixtures
-  fixturesSectionHeader: { color: C.muted, fontSize: 11, fontWeight: '700',
-                           letterSpacing: 1.5, paddingHorizontal: 16,
-                           paddingTop: 16, paddingBottom: 6 },
-  fixtureLeagueLabel:{ color: C.accentDim, fontSize: 10, fontWeight: '700',
-                       letterSpacing: 1, paddingHorizontal: 16,
-                       paddingTop: 8, paddingBottom: 2 },
-  fixtureCard:       { marginHorizontal: 12, marginBottom: 4, backgroundColor: C.card,
-                       borderRadius: 10, padding: 12,
-                       borderWidth: 1, borderColor: C.border },
-  fixtureCardLive:   { borderColor: C.red },
-  liveBadge:         { marginBottom: 6 },
-  liveBadgeText:     { color: C.red, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
-  fixtureTeams:      { flexDirection: 'row', alignItems: 'center' },
-  fixtureTeam:       { flex: 1, color: C.text, fontSize: 13, fontWeight: '600' },
-  fixtureTeamRight:  { textAlign: 'right' },
-  fixtureScoreBox:   { paddingHorizontal: 10, minWidth: 80, alignItems: 'center' },
-  fixtureScore:      { color: C.accent, fontSize: 16, fontWeight: '800' },
-  fixtureTime:       { color: C.muted, fontSize: 11, textAlign: 'center' },
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
+                   " AppleWebKit/605.1.15"),
+    "Accept":  "application/json",
+    "Referer": "https://www.fotmob.com/",
+}
 
-  // Player list
-  listHeader:        { color: C.muted, fontSize: 11, fontWeight: '700',
-                       letterSpacing: 1.5, padding: 16, paddingBottom: 4 },
-  legendRow:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-                       paddingHorizontal: 16, paddingBottom: 8 },
-  legendItem:        { color: C.muted, fontSize: 11 },
-  legendDots:        { flexDirection: 'row', alignItems: 'center' },
-  legendLabel:       { color: C.muted, fontSize: 11 },
-  playerRow:         { flexDirection: 'row', alignItems: 'center',
-                       paddingHorizontal: 16, paddingVertical: 10,
-                       borderBottomWidth: 1, borderBottomColor: C.border },
-  rank:              { color: C.muted, fontSize: 13, width: 28, fontWeight: '600' },
-  playerInfo:        { flex: 1 },
-  playerNameRow:     { flexDirection: 'row', alignItems: 'center' },
-  playerName:        { color: C.text, fontSize: 15, fontWeight: '600', flex: 1 },
-  weakIcon:          { fontSize: 13, marginLeft: 4 },
-  playerMetaRow:     { flexDirection: 'row', alignItems: 'center',
-                       marginTop: 3, gap: 8 },
-  playerSub:         { color: C.muted, fontSize: 12 },
-  score:             { fontSize: 17, fontWeight: '800', minWidth: 44, textAlign: 'right' },
-  formRow:           { flexDirection: 'row', gap: 3 },
-  formDot:           { width: 8, height: 8, borderRadius: 4 },
+# ── Cache ─────────────────────────────────────────────────────────────────────
 
-  // Empty
-  center:            { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
-  emptyIcon:         { fontSize: 48, marginBottom: 12 },
-  emptyText:         { color: C.text, fontSize: 18, fontWeight: '700' },
-  emptySub:          { color: C.muted, fontSize: 14, marginTop: 6, textAlign: 'center' },
-  loadBtn:           { marginTop: 24, borderWidth: 1, borderColor: C.accent,
-                       paddingHorizontal: 24, paddingVertical: 10, borderRadius: 8 },
-  loadBtnText:       { color: C.accent, fontWeight: '700' },
+_cache = {
+    "last_updated":  None,
+    "top25":         [],
+    "by_league":     {},
+    "fixtures":      {},
+    "all_players":   [],   # full unfiltered list for squad lookups
+    "teams":         [],   # team list with ga_pg for weak def lookup
+    "status":        "never_run",
+}
 
-  // League
-  leagueHeader:      { flexDirection: 'row', justifyContent: 'space-between',
-                       alignItems: 'center', padding: 16, backgroundColor: C.surface,
-                       borderBottomWidth: 1, borderBottomColor: C.border },
-  leagueTitle:       { color: C.accent, fontSize: 14, fontWeight: '800', letterSpacing: 1 },
-  chevron:           { color: C.muted, fontSize: 12 },
-  teamHeader:        { flexDirection: 'row', justifyContent: 'space-between',
-                       alignItems: 'center', paddingHorizontal: 24, paddingVertical: 10,
-                       backgroundColor: C.card, borderBottomWidth: 1, borderBottomColor: C.border },
-  teamTitle:         { color: C.text, fontSize: 13, fontWeight: '700' },
-  teamCount:         { color: C.muted, fontSize: 12 },
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-  // Modal
-  modalOverlay:      { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'flex-end' },
-  modalCard:         { backgroundColor: C.surface, borderTopLeftRadius: 20,
-                       borderTopRightRadius: 20, padding: 24, paddingBottom: 36 },
-  modalHeader:       { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  modalName:         { color: C.text, fontSize: 20, fontWeight: '800' },
-  modalSub:          { color: C.muted, fontSize: 13, marginTop: 4 },
-  scoreBadgeLarge:   { backgroundColor: C.card, borderRadius: 12,
-                       paddingHorizontal: 14, paddingVertical: 8 },
-  scoreBadgeText:    { fontSize: 24, fontWeight: '900' },
-  nextOppRow:        { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap',
-                       marginTop: 10, padding: 8, borderRadius: 8,
-                       backgroundColor: C.card },
-  nextOppRowWeak:    { backgroundColor: '#1A2510', borderWidth: 1, borderColor: C.green },
-  nextOppLabel:      { color: C.muted, fontSize: 13 },
-  nextOppTeam:       { color: C.text, fontSize: 13, fontWeight: '700' },
-  weakBadge:         { color: C.green, fontSize: 13, fontWeight: '700' },
-  nextOppTime:       { color: C.muted, fontSize: 12 },
-  sectionLabel:      { color: C.muted, fontSize: 11, fontWeight: '700',
-                       letterSpacing: 1.5, marginTop: 16, marginBottom: 8 },
-  statRow:           { flexDirection: 'row', justifyContent: 'space-between',
-                       paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: C.border },
-  statLabel:         { color: C.sub, fontSize: 14 },
-  statValue:         { color: C.text, fontSize: 14, fontWeight: '600' },
-  divider:           { height: 1, backgroundColor: C.border, marginVertical: 16 },
-  closeBtn:          { marginTop: 20, backgroundColor: C.card, borderRadius: 10,
-                       paddingVertical: 14, alignItems: 'center' },
-  closeBtnText:      { color: C.text, fontWeight: '700', fontSize: 15 },
+def safe_float(v):
+    try:
+        return float(str(v).replace(",","").strip()) if v not in [None,""," ","-","N/A"] else 0.0
+    except:
+        return 0.0
 
-  // Settings
-  settingsContent:   { padding: 20, paddingBottom: 60 },
-  settingsLabel:     { color: C.muted, fontSize: 11, fontWeight: '700',
-                       letterSpacing: 1.5, marginBottom: 8 },
-  settingsHint:      { color: C.muted, fontSize: 13, marginBottom: 12, lineHeight: 18 },
-  urlInput:          { backgroundColor: C.card, color: C.text, borderRadius: 10,
-                       padding: 14, fontSize: 13, borderWidth: 1, borderColor: C.border,
-                       marginBottom: 12 },
-  saveBtn:           { backgroundColor: C.accent, borderRadius: 10,
-                       paddingVertical: 14, alignItems: 'center' },
-  saveBtnText:       { color: C.bg, fontWeight: '800', fontSize: 15 },
-  formulaRow:        { flexDirection: 'row', justifyContent: 'space-between',
-                       paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border },
-  formulaLabel:      { color: C.text, fontSize: 13, flex: 1 },
-  formulaWeight:     { color: C.accent, fontSize: 14, fontWeight: '700' },
+def combined_score(xa_gap, cc_pg, big_chances, penalties_won):
+    return round(
+        (xa_gap        * 0.35) +
+        (cc_pg         * 0.30) +
+        (big_chances   * 0.20) +
+        (penalties_won * 0.15), 2)
 
-  // Match screen
-  matchHeader:       { flexDirection: 'row', alignItems: 'center',
-                       justifyContent: 'space-between', padding: 16,
-                       borderBottomWidth: 1, borderBottomColor: C.border },
-  backBtn:           { paddingVertical: 6, paddingRight: 16 },
-  backBtnText:       { color: C.accent, fontSize: 15, fontWeight: '700' },
-  livePill:          { backgroundColor: '#3D1515', borderRadius: 8,
-                       paddingHorizontal: 10, paddingVertical: 4 },
-  livePillText:      { color: C.red, fontSize: 12, fontWeight: '800', letterSpacing: 1 },
-  scoreBar:          { flexDirection: 'row', alignItems: 'center',
-                       paddingHorizontal: 16, paddingVertical: 20,
-                       backgroundColor: C.surface },
-  scoreTeam:         { flex: 1, color: C.text, fontSize: 15, fontWeight: '700' },
-  scoreTeamRight:    { textAlign: 'right' },
-  scoreCenter:       { alignItems: 'center', paddingHorizontal: 12, minWidth: 90 },
-  scoreLarge:        { color: C.accent, fontSize: 28, fontWeight: '900' },
-  scoreVs:           { color: C.muted, fontSize: 16, fontWeight: '600' },
-  scoreKickoff:      { color: C.muted, fontSize: 11, marginTop: 4, textAlign: 'center' },
-  weakDefRow:        { paddingHorizontal: 12, paddingVertical: 6, gap: 4 },
-  weakDefBanner:     { backgroundColor: '#1A2510', borderRadius: 8, padding: 8,
-                       borderWidth: 1, borderColor: C.green },
-  weakDefText:       { color: C.green, fontSize: 13, fontWeight: '700' },
-  squadHeader:       { color: C.muted, fontSize: 11, fontWeight: '700',
-                       letterSpacing: 1.5, paddingHorizontal: 16,
-                       paddingTop: 16, paddingBottom: 6 },
-  squadRow:          { flexDirection: 'row', alignItems: 'center',
-                       paddingHorizontal: 16, paddingVertical: 10,
-                       borderBottomWidth: 1, borderBottomColor: C.border },
-  squadRowHighlight: { backgroundColor: '#1C2415' },
-  squadPlayerInfo:   { flex: 1 },
-  squadNameRow:      { flexDirection: 'row', alignItems: 'center' },
-  starBadge:         { color: C.accent, fontSize: 13, fontWeight: '800' },
-  squadPlayerName:   { color: C.sub, fontSize: 14, fontWeight: '600', flex: 1 },
-  squadPlayerNameHighlight: { color: C.text },
-  weakIconSmall:     { fontSize: 12 },
-  squadPlayerSub:    { color: C.muted, fontSize: 11, marginTop: 2 },
-  squadScore:        { fontSize: 16, fontWeight: '800', minWidth: 40, textAlign: 'right' },
-  lineupSection:     { paddingHorizontal: 16, paddingTop: 16 },
-  lineupGrid:        { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
-  lineupPill:        { backgroundColor: C.card, borderRadius: 16,
-                       paddingHorizontal: 10, paddingVertical: 5,
-                       borderWidth: 1, borderColor: C.border },
-  lineupPillHighlight: { backgroundColor: '#1C2415', borderColor: C.accent },
-  lineupName:        { color: C.muted, fontSize: 12 },
-  lineupNameHighlight: { color: C.accent, fontWeight: '700' },
-});
+def form_score(last5):
+    """Convert last 5 results to a 0-1 form score. W=1, D=0.5, L=0"""
+    if not last5:
+        return None
+    pts = sum({"w": 1.0, "d": 0.5, "l": 0.0}.get(r.lower(), 0) for r in last5)
+    return round(pts / len(last5), 2)
+
+# ── FotMob fetchers ───────────────────────────────────────────────────────────
+
+async def get_standings(fotmob, league_name, league_id):
+    await asyncio.sleep(1.5)
+    rows = []
+    try:
+        data = await fotmob.standings(league_id)
+        if not isinstance(data, list) or not data:
+            return []
+        for item in data:
+            if not isinstance(item, dict): continue
+            table    = item.get("data", {}).get("table", {})
+            all_rows = table.get("all", [])
+            home_lkp = {str(t.get("id","")): t for t in table.get("home", []) if isinstance(t, dict)}
+            away_lkp = {str(t.get("id","")): t for t in table.get("away", []) if isinstance(t, dict)}
+            for team in all_rows:
+                if not isinstance(team, dict): continue
+                name   = (team.get("name") or team.get("shortName","")).strip()
+                tid    = str(team.get("id",""))
+                played = safe_float(team.get("played", 0))
+                try:    gf, ga = [safe_float(x) for x in team.get("scoresStr","0-0").split("-")]
+                except: gf, ga = 0.0, 0.0
+                ht   = home_lkp.get(tid, {})
+                at   = away_lkp.get(tid, {})
+                h_pl = safe_float(ht.get("played", played/2))
+                a_pl = safe_float(at.get("played", played/2))
+                try:    _, ga_h = [safe_float(x) for x in ht.get("scoresStr","0-0").split("-")]
+                except: ga_h = 0.0
+                try:    _, ga_a = [safe_float(x) for x in at.get("scoresStr","0-0").split("-")]
+                except: ga_a = 0.0
+                if name and played > 0:
+                    ga_pg   = round(ga / played, 2)
+                    ga_h_pg = round(ga_h / h_pl, 2) if h_pl > 0 else 0.0
+                    ga_a_pg = round(ga_a / a_pl, 2) if a_pl > 0 else 0.0
+                    rows.append({
+                        "team":      name,
+                        "team_id":   tid,
+                        "league":    league_name,
+                        "table_pos": safe_float(team.get("idx", 99)),
+                        "played":    int(played),
+                        "gf_pg":     round(safe_float(gf) / played, 2),
+                        "ga_pg":     ga_pg,
+                        "ga_h_pg":   ga_h_pg,
+                        "ga_a_pg":   ga_a_pg,
+                        "weak_def":  ga_pg >= WEAK_DEF_THRESH,
+                    })
+        log.info(f"standings {league_name}: {len(rows)} teams")
+    except Exception as e:
+        log.error(f"standings {league_name}: {e}")
+    return rows
+
+
+async def get_season_id(fotmob, team_id):
+    try:
+        data = await fotmob.get_team(int(team_id))
+        sid  = str(data.get("stats", {}).get("primarySeasonId", ""))
+        if sid and sid.isdigit():
+            return sid
+        for entry in data.get("stats", {}).get("seasonStatLinks", []):
+            s = str(entry.get("seasonId", ""))
+            if s and s.isdigit():
+                return s
+        return ""
+    except Exception as e:
+        log.error(f"season_id {team_id}: {e}")
+        return ""
+
+
+async def fetch_stat(sess, league_id, season_id, stat_name, all_team_ids):
+    url = (f"https://data.fotmob.com/stats/{league_id}"
+           f"/season/{season_id}/{stat_name}.json")
+    rows = []
+    try:
+        async with sess.get(url, headers=HEADERS,
+                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return rows
+            data      = await resp.json(content_type=None)
+            stat_list = data.get("TopLists", [{}])[0].get("StatList", [])
+            friendly  = STATS.get(stat_name, stat_name)
+            for p in stat_list:
+                tid = str(int(p.get("TeamId", 0)))
+                if tid not in all_team_ids: continue
+                rows.append({
+                    "player":     p.get("ParticipantName", "").strip(),
+                    "player_id":  str(p.get("ParticiantId", "")),
+                    "team":       p.get("TeamName", "").strip(),
+                    "team_id":    tid,
+                    "stat_type":  friendly,
+                    "stat_value": safe_float(p.get("StatValue", 0)),
+                })
+    except Exception as e:
+        log.error(f"fetch_stat {stat_name}: {e}")
+    return rows
+
+
+async def get_team_form(fotmob, team_id, team_name):
+    """Get last 5 results for a team."""
+    try:
+        fixtures = await fotmob.get_team_last_fixtures(int(team_id))
+        results  = []
+        matches  = fixtures if isinstance(fixtures, list) else []
+        for match in matches[-FORM_MATCHES:]:
+            if not isinstance(match, dict): continue
+            home_id    = str(match.get("home", {}).get("id", ""))
+            away_id    = str(match.get("away", {}).get("id", ""))
+            home_score = safe_float(match.get("home", {}).get("score", -1))
+            away_score = safe_float(match.get("away", {}).get("score", -1))
+            if home_score < 0 or away_score < 0: continue
+            is_home = (home_id == str(team_id))
+            if is_home:
+                results.append("w" if home_score > away_score
+                                else "d" if home_score == away_score else "l")
+            else:
+                results.append("w" if away_score > home_score
+                                else "d" if home_score == away_score else "l")
+        return results[-FORM_MATCHES:]
+    except Exception as e:
+        log.error(f"form {team_name}: {e}")
+        return []
+
+
+async def get_next_opponent(fotmob, team_id, team_name, teams_df):
+    """Get next fixture opponent and their defensive weakness."""
+    try:
+        fixture = await fotmob.get_team_next_fixture(int(team_id))
+        if not fixture or not isinstance(fixture, dict):
+            return None, False
+        home    = fixture.get("home", {})
+        away    = fixture.get("away", {})
+        home_id = str(home.get("id", ""))
+        away_id = str(away.get("id", ""))
+        opp_id  = away_id if home_id == str(team_id) else home_id
+        opp_name= away.get("name","") if home_id == str(team_id) else home.get("name","")
+        # Check opponent GA/G
+        opp_row = teams_df[teams_df["team_id"] == opp_id]
+        if not opp_row.empty:
+            opp_ga_pg   = float(opp_row.iloc[0]["ga_pg"])
+            is_weak_def = opp_ga_pg >= WEAK_DEF_THRESH
+        else:
+            is_weak_def = False
+        # Kickoff time
+        kickoff = fixture.get("status", {}).get("utcTime", "")
+        return {
+            "opponent":    opp_name,
+            "opponent_id": opp_id,
+            "kickoff":     kickoff,
+            "weak_def":    is_weak_def,
+        }, is_weak_def
+    except Exception as e:
+        log.error(f"next_opponent {team_name}: {e}")
+        return None, False
+
+
+async def get_fixtures_for_dates(fotmob, days=7):
+    """Get live + upcoming fixtures for the next N days across all leagues."""
+    fixtures_by_league = {ln: [] for ln in LEAGUES}
+    league_ids = set(str(info["id"]) for info in LEAGUES.values())
+    id_to_league = {str(info["id"]): ln for ln, info in LEAGUES.items()}
+
+    today = datetime.utcnow()
+    dates = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(days)]
+
+    for date_str in dates:
+        await asyncio.sleep(0.4)
+        try:
+            data = await fotmob.get_matches_by_date(date_str)
+            leagues = data.get("leagues", []) if isinstance(data, dict) else []
+            for league in leagues:
+                if not isinstance(league, dict): continue
+                lid = str(league.get("id", ""))
+                if lid not in league_ids: continue
+                ln  = id_to_league[lid]
+                for match in league.get("matches", []):
+                    if not isinstance(match, dict): continue
+                    status     = match.get("status", {})
+                    utc_time   = status.get("utcTime", "")
+                    finished   = status.get("finished", False)
+                    live       = status.get("ongoing", False)
+                    cancelled  = status.get("cancelled", False)
+                    if cancelled: continue
+                    home = match.get("home", {})
+                    away = match.get("away", {})
+                    fixtures_by_league[ln].append({
+                        "match_id":   str(match.get("id", "")),
+                        "home":       home.get("name", ""),
+                        "home_id":    str(home.get("id", "")),
+                        "away":       away.get("name", ""),
+                        "away_id":    str(away.get("id", "")),
+                        "kickoff":    utc_time,
+                        "date":       date_str,
+                        "live":       live,
+                        "finished":   finished,
+                        "score":      f"{home.get('score','-')} - {away.get('score','-')}" if (live or finished) else None,
+                        "minute":     status.get("liveTime", {}).get("short", "") if live else None,
+                    })
+        except Exception as e:
+            log.error(f"fixtures {date_str}: {e}")
+
+    # Sort each league by kickoff
+    for ln in fixtures_by_league:
+        fixtures_by_league[ln].sort(key=lambda x: x.get("kickoff","") or "")
+
+    return fixtures_by_league
+
+
+# ── Main scraper ──────────────────────────────────────────────────────────────
+
+async def run_scraper():
+    import pandas as pd
+    from fotmob import FotMob
+
+    log.info("Scraper v2 starting...")
+    all_team_rows   = []
+    all_player_rows = []
+
+    async with FotMob() as fotmob:
+
+        # Pass 1 — Standings
+        for league_name, info in LEAGUES.items():
+            rows = await get_standings(fotmob, league_name, info["id"])
+            all_team_rows.extend(rows)
+
+        if not all_team_rows:
+            raise RuntimeError("No standings data")
+
+        teams_df     = pd.DataFrame(all_team_rows)
+        all_team_ids = set(str(tid) for tid in teams_df["team_id"].tolist())
+        log.info(f"Standings: {len(teams_df)} teams")
+
+        # Pass 2 — Season IDs
+        league_seasons = {}
+        for league_name, info in LEAGUES.items():
+            lt = teams_df[teams_df["league"] == league_name]
+            if lt.empty: continue
+            await asyncio.sleep(0.8)
+            sid = await get_season_id(fotmob, lt.iloc[0]["team_id"])
+            if sid:
+                league_seasons[info["id"]] = sid
+                log.info(f"Season ID {league_name}: {sid}")
+
+        # Pass 3 — Player stats
+        fotmob_session = getattr(fotmob, "_session", None) or getattr(fotmob, "session", None)
+        sess = fotmob_session or aiohttp.ClientSession()
+
+        for league_name, info in LEAGUES.items():
+            lid = info["id"]
+            sid = league_seasons.get(lid)
+            if not sid: continue
+            for stat_name in STATS:
+                await asyncio.sleep(0.3)
+                rows = await fetch_stat(sess, lid, sid, stat_name, all_team_ids)
+                all_player_rows.extend(rows)
+            log.info(f"Players fetched: {league_name}")
+
+        if fotmob_session is None and sess:
+            await sess.close()
+
+        # Pass 4 — Team form (last 5) + next opponent
+        log.info("Fetching team form + next opponent...")
+        team_form     = {}
+        team_next_opp = {}
+        for _, team in teams_df.iterrows():
+            tid   = team["team_id"]
+            tname = team["team"]
+            await asyncio.sleep(0.5)
+            form = await get_team_form(fotmob, tid, tname)
+            team_form[tname] = form
+            await asyncio.sleep(0.5)
+            opp, _ = await get_next_opponent(fotmob, tid, tname, teams_df)
+            team_next_opp[tname] = opp
+            log.info(f"  {tname}: form={form} opp={opp['opponent'] if opp else 'N/A'}")
+
+        # Pass 5 — Fixtures
+        log.info("Fetching fixtures...")
+        fixtures = await get_fixtures_for_dates(fotmob, days=7)
+
+    if not all_player_rows:
+        raise RuntimeError("No player data")
+
+    # Aggregate players
+    import pandas as pd
+    raw  = pd.DataFrame(all_player_rows)
+    tgp  = {str(r["team_id"]): r["played"]    for _, r in teams_df.iterrows()}
+    tlg  = {str(r["team_id"]): r["league"]    for _, r in teams_df.iterrows()}
+    tpos = {str(r["team_id"]): r["table_pos"] for _, r in teams_df.iterrows()}
+
+    agg = {}
+    for _, row in raw.iterrows():
+        key = (row["player_id"], row["team_id"])
+        if key not in agg:
+            agg[key] = {
+                "player":          row["player"],
+                "team":            row["team"],
+                "team_id":         row["team_id"],
+                "league":          tlg.get(row["team_id"], ""),
+                "table_pos":       tpos.get(row["team_id"], 99),
+                "games":           tgp.get(row["team_id"], 30),
+                "assists":         0.0, "xa":              0.0,
+                "xa_per90":        0.0, "big_chances":     0.0,
+                "chances_created": 0.0, "penalties_won":   0.0,
+            }
+        st = row["stat_type"]
+        if st in agg[key]:
+            agg[key][st] = safe_float(row["stat_value"])
+
+    df = pd.DataFrame(list(agg.values()))
+    df["chances_per_game"] = df.apply(
+        lambda r: round(r["chances_created"] / r["games"], 2)
+        if r["games"] > 0 and r["chances_created"] > 0
+        else round(r["xa_per90"] * 3.5, 2), axis=1)
+    df["xa_gap"] = (df["xa"] - df["assists"]).round(1)
+    df["score"]  = df.apply(
+        lambda r: combined_score(
+            r["xa_gap"], r["chances_per_game"],
+            r["big_chances"], r["penalties_won"])
+        if (r["xa"] > 0 or r["chances_per_game"] > 0) else 0.0, axis=1)
+
+    df = df[df["score"] > 0].sort_values("score", ascending=False).reset_index(drop=True)
+
+    def player_dict(p):
+        tname    = p["team"]
+        form     = team_form.get(tname, [])
+        next_opp = team_next_opp.get(tname)
+        return {
+            "player":           p["player"],
+            "team":             p["team"],
+            "league":           p["league"],
+            "score":            round(float(p["score"]), 2),
+            "assists":          int(p["assists"]),
+            "xa":               round(float(p["xa"]), 2),
+            "xa_gap":           round(float(p["xa_gap"]), 2),
+            "chances_per_game": round(float(p["chances_per_game"]), 2),
+            "big_chances":      int(p["big_chances"]),
+            "penalties_won":    int(p["penalties_won"]),
+            # Form
+            "form":             form,
+            "form_score":       form_score(form),
+            # Next opponent
+            "next_opponent":    next_opp.get("opponent")    if next_opp else None,
+            "next_kickoff":     next_opp.get("kickoff")     if next_opp else None,
+            "weak_opp_def":     next_opp.get("weak_def")    if next_opp else False,
+        }
+
+    # Top 25
+    qt    = teams_df[teams_df["gf_pg"] >= MIN_GOALS_PG]["team"].tolist()
+    top25 = df[df["team"].isin(qt)].head(MAX_PLAYERS)
+    top25_list = [player_dict(p) for _, p in top25.iterrows()]
+
+    # By league → team → players
+    by_league = {}
+    for league_name in LEAGUES:
+        lg_df = df[df["league"] == league_name]
+        if lg_df.empty: continue
+        teams_in_league = {}
+        for _, p in lg_df.iterrows():
+            t = p["team"]
+            if t not in teams_in_league:
+                teams_in_league[t] = []
+            teams_in_league[t].append(player_dict(p))
+        sorted_teams = sorted(
+            teams_in_league.items(),
+            key=lambda x: safe_float(
+                teams_df[teams_df["team"] == x[0]]["table_pos"].values[0]
+                if not teams_df[teams_df["team"] == x[0]].empty else 99))
+        by_league[league_name] = [
+            {"team": team, "players": players}
+            for team, players in sorted_teams
+        ]
+
+    # Full player list for match screen squad lookups
+    all_players_list = [player_dict(p) for _, p in df.iterrows()]
+
+    # Team list for weak def lookups
+    teams_list = [
+        {"team": r["team"], "team_id": r["team_id"],
+         "ga_pg": r["ga_pg"], "weak_def": r["weak_def"]}
+        for _, r in teams_df.iterrows()
+    ]
+
+    log.info(f"Scraper done — {len(top25_list)} players, {len(by_league)} leagues")
+    return top25_list, by_league, fixtures, all_players_list, teams_list
+
+
+# ── Flask app ─────────────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route("/")
+@app.route("/status")
+def status():
+    return jsonify({
+        "status":       _cache["status"],
+        "last_updated": _cache["last_updated"],
+        "top25_count":  len(_cache["top25"]),
+        "leagues":      list(_cache["by_league"].keys()),
+    })
+
+@app.route("/data")
+def data():
+    if not _cache["top25"]:
+        return jsonify({"error": "No data yet — call /refresh first"}), 503
+    return jsonify({
+        "last_updated": _cache["last_updated"],
+        "top25":        _cache["top25"],
+        "by_league":    _cache["by_league"],
+    })
+
+@app.route("/fixtures")
+def fixtures():
+    if not _cache["fixtures"]:
+        return jsonify({"error": "No fixtures yet — call /refresh first"}), 503
+    return jsonify({
+        "last_updated": _cache["last_updated"],
+        "fixtures":     _cache["fixtures"],
+    })
+
+@app.route("/refresh", methods=["GET", "POST"])
+def refresh():
+    _cache["status"] = "refreshing"
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        top25, by_league, fixtures, all_players_full, teams_list = loop.run_until_complete(run_scraper())
+        loop.close()
+        _cache["top25"]        = top25
+        _cache["by_league"]    = by_league
+        _cache["fixtures"]     = fixtures
+        _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        _cache["status"]       = "ok"
+        # Store full player + team lists for match screen lookups
+        _cache["all_players"]  = all_players_full
+        _cache["teams"]        = teams_list
+        return jsonify({
+            "success":      True,
+            "last_updated": _cache["last_updated"],
+            "top25":        top25,
+            "by_league":    by_league,
+        })
+    except Exception as e:
+        _cache["status"] = f"error: {str(e)}"
+        log.error(f"Refresh failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# ── Match screen endpoint ─────────────────────────────────────────────────────
+
+@app.route("/match/<match_id>")
+def match_screen(match_id):
+    """
+    Returns squad intelligence for a fixture.
+    - Pre-kickoff: top ranked players from each squad + weak opp flag
+    - Live/finished: same + live lineups from FotMob
+    """
+    from flask import request
+
+    is_live     = request.args.get("live", "false").lower() == "true"
+    is_finished = request.args.get("finished", "false").lower() == "true"
+    home_id     = request.args.get("home_id", "")
+    away_id     = request.args.get("away_id", "")
+    home_name   = request.args.get("home", "Home")
+    away_name   = request.args.get("away", "Away")
+
+    all_players = _cache.get("all_players", [])
+    teams       = _cache.get("teams", [])
+
+    if not all_players:
+        return jsonify({"error": "No data yet — call /refresh first"}), 503
+
+    # Build team GA/G lookup
+    ga_lookup = {t["team_id"]: t["ga_pg"] for t in teams}
+    home_ga   = ga_lookup.get(home_id, 0)
+    away_ga   = ga_lookup.get(away_id, 0)
+
+    # Fuzzy team name matching — fixture names often differ from standings names
+    # e.g. "Man Utd" vs "Manchester United", "Spurs" vs "Tottenham"
+    def match_team(players, fixture_name, team_id):
+        # Try exact match first
+        exact = [p for p in players if p["team"] == fixture_name]
+        if exact: return exact
+        # Try team_id match
+        by_id = [p for p in players if p.get("team_id") == str(team_id)]
+        if by_id: return by_id
+        # Try case-insensitive partial match
+        fname_lower = fixture_name.lower()
+        partial = [p for p in players
+                   if fname_lower in p["team"].lower()
+                   or p["team"].lower() in fname_lower]
+        if partial: return partial
+        # Try first word match (e.g. "Manchester" matches "Manchester United")
+        first_word = fname_lower.split()[0] if fname_lower.split() else ""
+        if len(first_word) > 4:
+            word_match = [p for p in players
+                         if first_word in p["team"].lower()]
+            if word_match: return word_match
+        return []
+
+    home_players = sorted(
+        match_team(all_players, home_name, home_id),
+        key=lambda x: x["score"], reverse=True)
+    away_players = sorted(
+        match_team(all_players, away_name, away_id),
+        key=lambda x: x["score"], reverse=True)
+
+    # Top 25 player names for highlighting
+    top25_names = {p["player"] for p in _cache.get("top25", [])}
+
+    def enrich(players, opp_ga):
+        return [{
+            **p,
+            "in_top25":    p["player"] in top25_names,
+            "weak_opp":    opp_ga >= WEAK_DEF_THRESH,
+        } for p in players]
+
+    result = {
+        "match_id":     match_id,
+        "home":         home_name,
+        "away":         away_name,
+        "home_id":      home_id,
+        "away_id":      away_id,
+        "home_ga_pg":   home_ga,
+        "away_ga_pg":   away_ga,
+        "home_weak_def": home_ga >= WEAK_DEF_THRESH,
+        "away_weak_def": away_ga >= WEAK_DEF_THRESH,
+        "home_players": enrich(home_players, away_ga),   # away = opponent of home players
+        "away_players": enrich(away_players, home_ga),   # home = opponent of away players
+        "lineups":      None,
+    }
+
+    # If live or finished — fetch lineups
+    if is_live or is_finished:
+        try:
+            from fotmob import FotMob
+            async def fetch_lineups():
+                async with FotMob() as fotmob:
+                    return await fotmob.get_match_details(int(match_id))
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            details = loop.run_until_complete(fetch_lineups())
+            loop.close()
+
+            # Extract lineups
+            lineup_data = details.get("lineup", {}) if isinstance(details, dict) else {}
+            lineups = {}
+            for side in ["home", "away"]:
+                side_data = lineup_data.get(side, {})
+                players   = side_data.get("players", [])
+                starters  = []
+                for group in players:
+                    if isinstance(group, list):
+                        for p in group:
+                            if isinstance(p, dict):
+                                name = p.get("name", {})
+                                pname = (name.get("fullName") or
+                                         name.get("lastName") or
+                                         str(name)) if isinstance(name, dict) else str(name)
+                                starters.append({
+                                    "name":     pname.strip(),
+                                    "in_top25": pname.strip() in top25_names,
+                                })
+                lineups[side] = starters
+            result["lineups"] = lineups
+        except Exception as e:
+            log.error(f"lineups {match_id}: {e}")
+            result["lineup_error"] = str(e)
+
+    return jsonify(result)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    log.info(f"Starting server on port {port}")
+    app.run(host="0.0.0.0", port=port)
