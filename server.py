@@ -781,6 +781,7 @@ def data():
         "last_updated": _cache["last_updated"],
         "top25":        _cache["top25"],
         "by_league":    _cache["by_league"],
+        "all_players":  _cache.get("all_players", []),
     })
 
 @app.route("/fixtures")
