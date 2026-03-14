@@ -48,6 +48,20 @@ HEADERS = {
     "Referer": "https://www.fotmob.com/",
 }
 
+# ── Image URLs (no API call needed) ──────────────────────────────────────────
+
+def player_img_url(player_id):
+    if not player_id: return None
+    return f"https://images.fotmob.com/image_resources/playerimages/{player_id}.png"
+
+def team_logo_url(team_id):
+    if not team_id: return None
+    return f"https://images.fotmob.com/image_resources/logo/teamlogo/{team_id}.png"
+
+def league_logo_url(league_id):
+    if not league_id: return None
+    return f"https://images.fotmob.com/image_resources/logo/leaguelogo/{league_id}.png"
+
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
 _cache = {
@@ -265,12 +279,16 @@ async def get_fixtures_for_dates(fotmob, days=7):
                     if cancelled: continue
                     home = match.get("home", {})
                     away = match.get("away", {})
+                    h_id = str(home.get("id", ""))
+                    a_id = str(away.get("id", ""))
                     fixtures_by_league[ln].append({
                         "match_id":   str(match.get("id", "")),
                         "home":       home.get("name", ""),
-                        "home_id":    str(home.get("id", "")),
+                        "home_id":    h_id,
                         "away":       away.get("name", ""),
-                        "away_id":    str(away.get("id", "")),
+                        "away_id":    a_id,
+                        "home_logo":  team_logo_url(h_id),
+                        "away_logo":  team_logo_url(a_id),
                         "kickoff":    utc_time,
                         "date":       date_str,
                         "live":       live,
@@ -460,6 +478,7 @@ async def run_scraper():
         return {
             "player":           p["player"],
             "team":             p["team"],
+            "team_id":          str(p["team_id"]),
             "league":           p["league"],
             "score":            round(float(p["score"]), 2),
             "assists":          int(p["assists"]),
