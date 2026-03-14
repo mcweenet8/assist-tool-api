@@ -746,8 +746,9 @@ async def run_scraper():
             "ga_a_pg":   round(float(r.get("ga_a_pg", 0)), 2),
             "home_adv":  round(float(r.get("home_adv", 0)), 2),
             "away_vuln": round(float(r.get("away_vuln", 0)), 2),
-            "weak_def":  bool(r.get("weak_def", False)),
-            "team_logo": team_logo_url(str(r.get("team_id",""))),
+            "weak_def":   bool(r.get("weak_def", False)),
+            "conference": r.get("conference", ""),
+            "team_logo":  team_logo_url(str(r.get("team_id",""))),
         }
         for _, r in teams_df.iterrows()
     ]
