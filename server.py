@@ -119,8 +119,9 @@ async def get_standings(fotmob, league_name, league_id):
             item_data = item.get("data", {})
             table = item_data.get("table", {})
 
-            # Standard format
-            all_rows = table.get("all", [])
+            # For MLS, skip the top-level table and use tables_list for conference names
+            has_sub_tables = bool(item_data.get("tables", []))
+            all_rows = [] if has_sub_tables else table.get("all", [])
 
             # MLS format: data.tables is a list of conference tables
             if not all_rows:
@@ -982,16 +983,22 @@ def standings():
 
         # MLS: split into Eastern/Western conferences
         if league_name == "MLS":
-            conferences = {}
+            conferences = {"Eastern": [], "Western": []}
             for t in lg:
-                conf = t.get("conference", "Overall")
-                if conf not in conferences: conferences[conf] = []
-                conferences[conf].append(t)
-            for conf_name, conf_teams in sorted(conferences.items()):
-                conf_sorted = sorted(conf_teams, key=lambda x: safe_float(x.get("table_pos", 99)))
-                key = f"MLS — {conf_name}" if conf_name != "Overall" else "MLS"
-                by_league[key] = [build_team_row(t) for t in conf_sorted]
-            log.info(f"MLS conferences in by_league: {[k for k in by_league if 'MLS' in k]}")
+                conf = t.get("conference", "")
+                if conf in conferences:
+                    conferences[conf].append(t)
+            if any(conferences.values()):
+                for conf_name in ["Eastern", "Western"]:
+                    if not conferences[conf_name]: continue
+                    conf_sorted = sorted(conferences[conf_name],
+                                        key=lambda x: safe_float(x.get("table_pos", 99)))
+                    by_league[f"MLS {conf_name}"] = [build_team_row(t) for t in conf_sorted]
+                log.info(f"MLS conferences: {[k for k in by_league if 'MLS' in k]}")
+            else:
+                lg_sorted = sorted(lg, key=lambda x: safe_float(x.get("table_pos", 99)))
+                by_league["MLS"] = [build_team_row(t) for t in lg_sorted]
+                log.warning("MLS: no conference data, showing combined")
             continue
 
         lg_sorted = sorted(lg, key=lambda x: safe_float(x.get("table_pos", 99)))
