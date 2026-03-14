@@ -1424,16 +1424,18 @@ def live_match(match_id):
                 log.info(f"  {k} (dict): {list(v.keys())[:8]}")
             elif isinstance(v, list) and v:
                 log.info(f"  {k} (list[{len(v)}]): first={str(v[0])[:80]}")
-        content = data.get("content", data)  # fallback to root if no content key
-        header  = data
-        teams   = header.get("teams", [{}, {}])
-        home_id = str(teams[0].get("id","")) if teams else ""
-        away_id = str(teams[1].get("id","")) if len(teams) > 1 else ""
+        # Flat structure: home{}, away{}, incidents[], stats[]
+        home_data = data.get("home", {})
+        away_data = data.get("away", {})
+        home_id   = str(home_data.get("id",""))
+        away_id   = str(away_data.get("id",""))
 
-        # Events
-        mf       = content.get("matchFacts", {})
-        raw_evts = mf.get("events", {})
-        evt_list = raw_evts.get("events", []) if isinstance(raw_evts, dict) else []
+        # Events — try all possible keys
+        evt_list = (data.get("incidents") or
+                    data.get("events") or
+                    data.get("goals") or [])
+        if not isinstance(evt_list, list): evt_list = []
+        log.info(f"live {match_id} evt_list={len(evt_list)}")
 
         events = []
         for e in evt_list:
@@ -1474,40 +1476,29 @@ def live_match(match_id):
                     "side":    side,
                 })
 
-        # Stats — FotMob structure: content.stats.stats[group].stats[item].stats=[home,away]
-        stats_raw = content.get("stats", {}).get("stats", [])
+        # Stats — flat list at data['stats']
+        # Each item: {'title': 'Possession', 'localizedTitle': '...', 'stats': [62, 38]}
+        stats_raw = data.get("stats", [])
+        if not isinstance(stats_raw, list):
+            # Try nested structure
+            stats_raw = data.get("stats", {}).get("stats", [])
         stats_out = {}
 
-        def extract_stat_vals(stat):
-            """Extract [home, away] values from a stat item."""
-            # Try 'stats' key first (list of values)
-            vals = stat.get("stats", [])
-            if isinstance(vals, list) and len(vals) >= 2:
-                return [safe_float(vals[0]), safe_float(vals[1])]
-            # Try 'value' key (sometimes a dict with home/away)
-            val = stat.get("value","")
-            if isinstance(val, str) and "%" in val:
-                try:
-                    h = safe_float(val.replace("%","").strip())
-                    return [h, 100-h]
-                except: pass
-            return None
-
-        for group in stats_raw:
-            if not isinstance(group, dict): continue
-            for stat in group.get("stats", []):
-                if not isinstance(stat, dict): continue
-                title = stat.get("title","").lower()
-                vals = extract_stat_vals(stat)
-                if not vals: continue
-                if "possession" in title:
-                    stats_out["possession"] = vals
-                elif "shot" in title and "target" in title:
-                    stats_out["shots_on_target"] = vals
-                elif "shot" in title and "target" not in title and "block" not in title:
-                    stats_out["shots"] = vals
-                elif "xg" in title or "expected" in title and "goal" in title:
-                    stats_out["xg"] = [round(vals[0],2), round(vals[1],2)]
+        for stat in stats_raw:
+            if not isinstance(stat, dict): continue
+            title = (stat.get("title","") or stat.get("localizedTitle","")).lower()
+            vals  = stat.get("stats", [])
+            if not isinstance(vals, list) or len(vals) < 2: continue
+            h, a = safe_float(vals[0]), safe_float(vals[1])
+            if "possession" in title:
+                stats_out["possession"] = [h, a]
+            elif "shot" in title and "target" in title:
+                stats_out["shots_on_target"] = [h, a]
+            elif "shot" in title and "target" not in title and "block" not in title:
+                stats_out["shots"] = [h, a]
+            elif "xg" in title or ("expected" in title and "goal" in title):
+                stats_out["xg"] = [round(h,2), round(a,2)]
+        log.info(f"live {match_id} stats found: {list(stats_out.keys())}")
 
         def get_color(team):
             # Try multiple color fields FotMob uses
@@ -1515,8 +1506,8 @@ def live_match(match_id):
             if c and not c.startswith("#"): c = f"#{c}"
             return c or None
 
-        home_color = get_color(teams[0]) if teams else None
-        away_color = get_color(teams[1]) if len(teams) > 1 else None
+        home_color = get_color(home_data)
+        away_color = get_color(away_data)
 
         # Log full data structure for debugging first time
         log.info(f"live {match_id}: {len(events)} events, stats={list(stats_out.keys())}, colors={home_color},{away_color}")
@@ -1530,9 +1521,10 @@ def live_match(match_id):
         return jsonify({
             "events":     events,
             "stats":      stats_out,
-            "minute":     header.get("status",{}).get("liveTime",{}).get("short",""),
-            "score":      [teams[0].get("score",0) if teams else 0,
-                           teams[1].get("score",0) if len(teams)>1 else 0],
+            "minute":     (data.get("liveTime",{}) or {}).get("short","") or
+                           (data.get("status",{}) or {}).get("liveTime",""),
+            "score":      [safe_float(data.get("homeScore",{}).get("current",0) if isinstance(data.get("homeScore"),dict) else data.get("homeScore",0)),
+                           safe_float(data.get("awayScore",{}).get("current",0) if isinstance(data.get("awayScore"),dict) else data.get("awayScore",0))],
             "home_color": home_color,
             "away_color": away_color,
         })
