@@ -30,6 +30,8 @@ LEAGUES = {
     "Serie A":        {"id": 55, "short": "SerieA"},
     "Bundesliga":     {"id": 54, "short": "Bundesliga"},
     "Ligue 1":        {"id": 53, "short": "Ligue1"},
+    "MLS":            {"id": 130, "short": "MLS"},
+    "A-League":       {"id": 113, "short": "ALeague"},
 }
 
 STATS = {
