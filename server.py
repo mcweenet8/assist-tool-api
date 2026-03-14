@@ -1282,31 +1282,67 @@ def live_match(match_id):
                     "side":    side,
                 })
 
-        # Stats
+        # Stats — FotMob structure: content.stats.stats[group].stats[item].stats=[home,away]
         stats_raw = content.get("stats", {}).get("stats", [])
         stats_out = {}
+
+        def extract_stat_vals(stat):
+            """Extract [home, away] values from a stat item."""
+            # Try 'stats' key first (list of values)
+            vals = stat.get("stats", [])
+            if isinstance(vals, list) and len(vals) >= 2:
+                return [safe_float(vals[0]), safe_float(vals[1])]
+            # Try 'value' key (sometimes a dict with home/away)
+            val = stat.get("value","")
+            if isinstance(val, str) and "%" in val:
+                try:
+                    h = safe_float(val.replace("%","").strip())
+                    return [h, 100-h]
+                except: pass
+            return None
+
         for group in stats_raw:
             if not isinstance(group, dict): continue
             for stat in group.get("stats", []):
                 if not isinstance(stat, dict): continue
                 title = stat.get("title","").lower()
-                vals  = stat.get("stats", stat.get("values", []))
-                if not vals or len(vals) < 2: continue
+                vals = extract_stat_vals(stat)
+                if not vals: continue
                 if "possession" in title:
-                    stats_out["possession"] = [safe_float(vals[0]), safe_float(vals[1])]
+                    stats_out["possession"] = vals
                 elif "shot" in title and "target" in title:
-                    stats_out["shots_on_target"] = [safe_float(vals[0]), safe_float(vals[1])]
-                elif "shot" in title and "target" not in title:
-                    stats_out["shots"] = [safe_float(vals[0]), safe_float(vals[1])]
-                elif "xg" in title or "expected goal" in title:
-                    stats_out["xg"] = [round(safe_float(vals[0]),2), round(safe_float(vals[1]),2)]
+                    stats_out["shots_on_target"] = vals
+                elif "shot" in title and "target" not in title and "block" not in title:
+                    stats_out["shots"] = vals
+                elif "xg" in title or "expected" in title and "goal" in title:
+                    stats_out["xg"] = [round(vals[0],2), round(vals[1],2)]
+
+        def get_color(team):
+            # Try multiple color fields FotMob uses
+            c = team.get("color") or team.get("teamColors",{}).get("fontColor") or                 team.get("teamColors",{}).get("color") or ""
+            if c and not c.startswith("#"): c = f"#{c}"
+            return c or None
+
+        home_color = get_color(teams[0]) if teams else None
+        away_color = get_color(teams[1]) if len(teams) > 1 else None
+
+        # Log full data structure for debugging first time
+        log.info(f"live {match_id}: {len(events)} events, stats={list(stats_out.keys())}, colors={home_color},{away_color}")
+        if not events and not stats_out:
+            # Log raw structure to help debug
+            log.warning(f"live {match_id} raw mf keys: {list(mf.keys())}")
+            log.warning(f"live {match_id} raw stats groups: {len(stats_raw)}")
+            if stats_raw:
+                log.warning(f"live first group: {str(stats_raw[0])[:200]}")
 
         return jsonify({
-            "events": events,
-            "stats":  stats_out,
-            "minute": header.get("status",{}).get("liveTime",{}).get("short",""),
-            "score":  [teams[0].get("score",0) if teams else 0,
-                       teams[1].get("score",0) if len(teams)>1 else 0],
+            "events":     events,
+            "stats":      stats_out,
+            "minute":     header.get("status",{}).get("liveTime",{}).get("short",""),
+            "score":      [teams[0].get("score",0) if teams else 0,
+                           teams[1].get("score",0) if len(teams)>1 else 0],
+            "home_color": home_color,
+            "away_color": away_color,
         })
     except Exception as e:
         log.error(f"live_match {match_id}: {e}")
