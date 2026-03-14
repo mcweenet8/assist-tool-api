@@ -127,8 +127,14 @@ async def get_standings(fotmob, league_name, league_id):
                 tables_list = item_data.get("tables", [])
                 for t_item in tables_list:
                     if isinstance(t_item, dict):
-                        sub_table = t_item.get("table", {})
-                        all_rows.extend(sub_table.get("all", []))
+                        sub_table  = t_item.get("table", {})
+                        conf_name  = t_item.get("leagueName", t_item.get("name", ""))
+                        conf_teams = sub_table.get("all", [])
+                        # Tag each team with their conference
+                        for t in conf_teams:
+                            if isinstance(t, dict):
+                                t["_conference"] = conf_name
+                        all_rows.extend(conf_teams)
                         home_lkp_combined.update({str(t.get("id","")): t for t in sub_table.get("home", []) if isinstance(t, dict)})
                         away_lkp_combined.update({str(t.get("id","")): t for t in sub_table.get("away", []) if isinstance(t, dict)})
 
@@ -179,6 +185,7 @@ async def get_standings(fotmob, league_name, league_id):
                         "team":      name,
                         "team_id":   tid,
                         "league":    league_name,
+                        "conference": team.get("_conference", ""),
                         "table_pos": safe_float(team.get("idx", 99)),
                         "played":    int(played),
                         "gf":        int(safe_float(gf)),
@@ -934,6 +941,25 @@ def match_screen(match_id):
 
 # ── Standings endpoint ───────────────────────────────────────────────────────
 
+def build_team_row(t):
+    return {
+        "team":       t["team"],
+        "team_id":    t["team_id"],
+        "table_pos":  t.get("table_pos", ""),
+        "played":     t.get("played", 0),
+        "gf_pg":      t.get("gf_pg", 0),
+        "ga_pg":      t.get("ga_pg", 0),
+        "gf_h_pg":    t.get("gf_h_pg", 0),
+        "ga_h_pg":    t.get("ga_h_pg", 0),
+        "gf_a_pg":    t.get("gf_a_pg", 0),
+        "ga_a_pg":    t.get("ga_a_pg", 0),
+        "home_adv":   t.get("home_adv", 0),
+        "away_vuln":  t.get("away_vuln", 0),
+        "weak_def":   t.get("weak_def", False),
+        "conference": t.get("conference", ""),
+        "team_logo":  team_logo_url(t.get("team_id", "")),
+    }
+
 @app.route("/standings")
 def standings():
     """Return full team standings data by league."""
@@ -950,24 +976,22 @@ def standings():
     for league_name in LEAGUES:
         lg = [t for t in teams if t.get("league") == league_name]
         if not lg: continue
-        # Sort by table position
+
+        # MLS: split into Eastern/Western conferences
+        if league_name == "MLS":
+            conferences = {}
+            for t in lg:
+                conf = t.get("conference", "Overall")
+                if conf not in conferences: conferences[conf] = []
+                conferences[conf].append(t)
+            for conf_name, conf_teams in sorted(conferences.items()):
+                conf_sorted = sorted(conf_teams, key=lambda x: safe_float(x.get("table_pos", 99)))
+                key = f"MLS — {conf_name}" if conf_name != "Overall" else "MLS"
+                by_league[key] = [build_team_row(t) for t in conf_sorted]
+            continue
+
         lg_sorted = sorted(lg, key=lambda x: safe_float(x.get("table_pos", 99)))
-        by_league[league_name] = [{
-            "team":       t["team"],
-            "team_id":    t["team_id"],
-            "table_pos":  t.get("table_pos", ""),
-            "played":     t.get("played", 0),
-            "gf_pg":      t.get("gf_pg", 0),
-            "ga_pg":      t.get("ga_pg", 0),
-            "gf_h_pg":    t.get("gf_h_pg", 0),
-            "ga_h_pg":    t.get("ga_h_pg", 0),
-            "gf_a_pg":    t.get("gf_a_pg", 0),
-            "ga_a_pg":    t.get("ga_a_pg", 0),
-            "home_adv":   t.get("home_adv", 0),
-            "away_vuln":  t.get("away_vuln", 0),
-            "weak_def":   t.get("weak_def", False),
-            "team_logo":  team_logo_url(t.get("team_id","")),
-        } for t in lg_sorted]
+        by_league[league_name] = [build_team_row(t) for t in lg_sorted]
 
     return jsonify({
         "last_updated": _cache["last_updated"],
