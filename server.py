@@ -114,7 +114,11 @@ async def get_standings(fotmob, league_name, league_id):
         for item in data:
             if not isinstance(item, dict): continue
             table    = item.get("data", {}).get("table", {})
-            all_rows = table.get("all", [])
+            # Try "all" first, then "data" for different league formats (e.g. MLS conferences)
+            all_rows = table.get("all", []) or table.get("data", [])
+            # Also try nested tables (MLS has Eastern/Western as separate items)
+            if not all_rows and isinstance(table, list):
+                all_rows = table
             home_lkp_combined.update({str(t.get("id","")): t for t in table.get("home", []) if isinstance(t, dict)})
             away_lkp_combined.update({str(t.get("id","")): t for t in table.get("away", []) if isinstance(t, dict)})
             all_team_rows_in_league.extend([t for t in all_rows if isinstance(t, dict)])
@@ -139,16 +143,26 @@ async def get_standings(fotmob, league_name, league_id):
                     ga_pg   = round(ga / played, 2)
                     ga_h_pg = round(ga_h / h_pl, 2) if h_pl > 0 else 0.0
                     ga_a_pg = round(ga_a / a_pl, 2) if a_pl > 0 else 0.0
+                    gf_pg   = round(safe_float(gf) / played, 2)
+                    gf_h_pg = round(gf_h / h_pl, 2) if h_pl > 0 else 0.0
+                    gf_a_pg = round(gf_a / a_pl, 2) if a_pl > 0 else 0.0
                     rows.append({
                         "team":      name,
                         "team_id":   tid,
                         "league":    league_name,
                         "table_pos": safe_float(team.get("idx", 99)),
                         "played":    int(played),
-                        "gf_pg":     round(safe_float(gf) / played, 2),
+                        "gf":        int(safe_float(gf)),
+                        "ga":        int(safe_float(ga)),
+                        "gf_pg":     gf_pg,
                         "ga_pg":     ga_pg,
+                        "gf_h_pg":   gf_h_pg,
                         "ga_h_pg":   ga_h_pg,
+                        "gf_a_pg":   gf_a_pg,
                         "ga_a_pg":   ga_a_pg,
+                        "home_adv":  round(gf_h_pg - gf_a_pg, 2),
+                        "away_vuln": round(ga_a_pg - ga_h_pg, 2),
+                        "goals_scored_pg": gf_pg,
                         "weak_def":  ga_pg >= WEAK_DEF_THRESH,
                     })
         log.info(f"standings {league_name}: {len(rows)} teams")
@@ -266,7 +280,8 @@ async def get_fixtures_for_dates(fotmob, days=7):
     id_to_league = {str(info["id"]): ln for ln, info in LEAGUES.items()}
 
     today = datetime.utcnow()
-    dates = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(days)]
+    # Include yesterday for recent results
+    dates = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(-1, days)]
 
     for date_str in dates:
         await asyncio.sleep(0.4)
