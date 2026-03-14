@@ -31,7 +31,7 @@ LEAGUES = {
     "Bundesliga":     {"id": 54, "short": "Bundesliga"},
     "Ligue 1":        {"id": 53, "short": "Ligue1"},
     "MLS":            {"id": 130, "short": "MLS"},
-    "A-League":       {"id": 113, "short": "ALeague"},
+    "A-League Men":   {"id": 901954, "short": "ALeague"},
 }
 
 STATS = {
@@ -166,7 +166,11 @@ async def get_standings(fotmob, league_name, league_id):
                         "weak_def":  ga_pg >= WEAK_DEF_THRESH,
                     })
         if len(rows) == 0:
-            log.warning(f"standings {league_name}: 0 teams — raw data keys: {[list(item.get('data',{}).keys())[:5] for item in data[:2]] if isinstance(data, list) else str(data)[:100]}")
+            log.warning(f"standings {league_name}: 0 teams — items={len(data) if isinstance(data,list) else 0}, first_item_keys={list(data[0].keys())[:8] if isinstance(data,list) and data else 'none'}")
+            if isinstance(data, list) and data:
+                first = data[0]
+                table = first.get("data",{}).get("table",{})
+                log.warning(f"  table keys: {list(table.keys())[:10]}, all_rows_len={len(table.get('all',[]))}")
         else:
             log.info(f"standings {league_name}: {len(rows)} teams")
     except Exception as e:
