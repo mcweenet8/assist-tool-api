@@ -352,20 +352,29 @@ async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
                                     if not isinstance(p, dict): continue
                                     pid = str(p.get("id", ""))
                                     if pid == str(player_id):
+                                        # FotMob stats are nested — flatten and search
                                         stats = p.get("stats", {})
-                                        if isinstance(stats, list):
-                                            for stat_group in stats:
-                                                if isinstance(stat_group, dict):
-                                                    for k, v in stat_group.items():
-                                                        if "xA" in str(k) or "expected_assist" in str(k).lower():
-                                                            xa_val = safe_float(v)
-                                        elif isinstance(stats, dict):
-                                            xa_val = safe_float(
-                                                stats.get("xA") or
-                                                stats.get("expected_assists") or
-                                                stats.get("ExpectedAssists", 0))
-                                        minutes = safe_float(p.get("minutesPlayed", 0) or
-                                                            p.get("timeSubbedIn", 0))
+                                        def find_xa(obj, depth=0):
+                                            if depth > 5: return 0.0
+                                            if isinstance(obj, dict):
+                                                for k, v in obj.items():
+                                                    k_lower = str(k).lower()
+                                                    if k_lower in ("xa", "expected_assists", "expectedassists"):
+                                                        val = safe_float(v)
+                                                        if val > 0: return val
+                                                for v in obj.values():
+                                                    r = find_xa(v, depth+1)
+                                                    if r > 0: return r
+                                            elif isinstance(obj, list):
+                                                for item in obj:
+                                                    r = find_xa(item, depth+1)
+                                                    if r > 0: return r
+                                            return 0.0
+                                        xa_val  = find_xa(stats)
+                                        minutes = safe_float(
+                                            p.get("minutesPlayed") or
+                                            p.get("minutePlayed") or
+                                            p.get("timeSubbedIn") or 0)
             except Exception as e:
                 log.warning(f"  match details {match_id}: {e}")
 
