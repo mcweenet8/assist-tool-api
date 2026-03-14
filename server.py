@@ -315,120 +315,95 @@ async def get_fixtures_for_dates(fotmob, days=7):
     return fixtures_by_league
 
 
-# ── Player L5 xA fetcher ─────────────────────────────────────────────────────
+# ── Player L5 goals + assists fetcher ────────────────────────────────────────
 
-async def get_player_l5_xa(fotmob, player_id, team_id, player_name):
-    """Fetch last 5 matches for a player's team, extract their xA per game."""
+async def get_player_l5(fotmob, player_id, team_id, player_name):
+    """
+    Fetch last 5 matches for a player's team.
+    Extract goals + assists from match events (public endpoint, no auth needed).
+    Returns list of {opponent, result, score, goals, assists, date} dicts.
+    """
     games = []
     try:
         fixtures = await fotmob.get_team_last_fixtures(int(team_id))
         matches  = fixtures if isinstance(fixtures, list) else []
         recent   = [m for m in matches if isinstance(m, dict)][-5:]
 
-        fotmob_session = getattr(fotmob, "_session", None) or getattr(fotmob, "session", None)
+        for match in recent:
+            match_id = match.get("id") or match.get("matchId")
+            home     = match.get("home", {})
+            away     = match.get("away", {})
+            home_id  = str(home.get("id", ""))
+            is_home  = home_id == str(team_id)
+            opponent = away.get("name","") if is_home else home.get("name","")
+            h_score  = safe_float(home.get("score", -1))
+            a_score  = safe_float(away.get("score", -1))
 
-        async with aiohttp.ClientSession() as fallback_session:
-            sess = fotmob_session or fallback_session
+            if is_home:
+                result = "W" if h_score > a_score else "D" if h_score == a_score else "L"
+                score  = f"{int(h_score)}-{int(a_score)}"
+            else:
+                result = "W" if a_score > h_score else "D" if h_score == a_score else "L"
+                score  = f"{int(a_score)}-{int(h_score)}"
 
-            for match in recent:
-                match_id = match.get("id") or match.get("matchId")
-                home     = match.get("home", {})
-                away     = match.get("away", {})
-                home_id  = str(home.get("id", ""))
-                is_home  = home_id == str(team_id)
-                opponent = away.get("name","") if is_home else home.get("name","")
-                h_score  = safe_float(home.get("score", -1))
-                a_score  = safe_float(away.get("score", -1))
+            goals   = 0
+            assists = 0
 
-                if is_home:
-                    result = "W" if h_score > a_score else "D" if h_score == a_score else "L"
-                    score  = f"{int(h_score)}-{int(a_score)}"
-                else:
-                    result = "W" if a_score > h_score else "D" if h_score == a_score else "L"
-                    score  = f"{int(a_score)}-{int(h_score)}"
+            if match_id:
+                try:
+                    # get_match() uses public endpoint — no auth token needed
+                    match_data = await fotmob.get_match(int(match_id))
+                    if isinstance(match_data, dict):
+                        # Events are in content.matchFacts.events or header.events
+                        events = []
+                        content_data = match_data.get("content", {})
+                        match_facts  = content_data.get("matchFacts", {})
 
-                xa_val  = 0.0
-                minutes = 0
+                        # Try matchFacts.events first
+                        raw_events = match_facts.get("events", {})
+                        if isinstance(raw_events, dict):
+                            events = raw_events.get("events", [])
+                        elif isinstance(raw_events, list):
+                            events = raw_events
 
-                if match_id:
-                    try:
-                        url = f"https://www.fotmob.com/api/matchDetails?matchId={match_id}"
-                        async with sess.get(url, headers=HEADERS,
-                                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                            if resp.status == 200:
-                                details = await resp.json(content_type=None)
-                                if isinstance(details, dict):
-                                    log.info(f"  match {match_id} keys: {list(details.keys())[:8]}")
+                        # Fallback: header events
+                        if not events:
+                            events = match_data.get("header", {}).get("events", [])
 
-                                    def find_xa(obj, depth=0):
-                                        if depth > 6: return None
-                                        if isinstance(obj, dict):
-                                            for k, v in obj.items():
-                                                kl = str(k).lower().replace(" ","").replace("_","")
-                                                if kl in ("xa","expectedassists","xassists","expectedassist"):
-                                                    val = safe_float(v)
-                                                    if val > 0: return val
-                                            for v in obj.values():
-                                                r = find_xa(v, depth+1)
-                                                if r is not None: return r
-                                        elif isinstance(obj, list):
-                                            for item in obj:
-                                                r = find_xa(item, depth+1)
-                                                if r is not None: return r
-                                        return None
+                        log.info(f"  match {match_id}: {len(events)} events")
 
-                                    found = False
-                                    # Method 1: lineup
-                                    lineup = details.get("lineup", {})
-                                    for side in ["home", "away"]:
-                                        for group in lineup.get(side, {}).get("players", []):
-                                            players_list = group if isinstance(group, list) else [group]
-                                            for p in players_list:
-                                                if not isinstance(p, dict): continue
-                                                pid = str(p.get("id","") or p.get("playerId",""))
-                                                if pid == str(player_id):
-                                                    found = True
-                                                    stats = p.get("stats", p.get("stat", {}))
-                                                    log.info(f"  FOUND in lineup, stats: {str(stats)[:200]}")
-                                                    result_xa = find_xa(stats)
-                                                    xa_val  = result_xa if result_xa is not None else 0.0
-                                                    minutes = safe_float(
-                                                        p.get("minutesPlayed") or
-                                                        p.get("minutePlayed") or
-                                                        p.get("timeSubbedIn") or 0)
-                                                    log.info(f"  xa={xa_val} min={minutes}")
+                        for event in events:
+                            if not isinstance(event, dict): continue
+                            etype = str(event.get("type","") or event.get("eventType","")).lower()
 
-                                    # Method 2: content.playerStats
-                                    if not found:
-                                        ps_data = details.get("content",{}).get("playerStats",{})
-                                        log.info(f"  playerStats keys: {list(ps_data.keys())[:5]}")
-                                        for side in ["home","away"]:
-                                            for ps in ps_data.get(side, []):
-                                                if not isinstance(ps, dict): continue
-                                                pid = str(ps.get("playerId","") or ps.get("id",""))
-                                                if pid == str(player_id):
-                                                    found = True
-                                                    log.info(f"  FOUND in playerStats: {str(ps)[:200]}")
-                                                    xa_val = safe_float(
-                                                        ps.get("expectedAssists") or
-                                                        ps.get("xA") or ps.get("xa") or 0)
+                            # Goal event
+                            if any(g in etype for g in ["goal", "addedgoal", "penaltygoal"]):
+                                # Check if this player scored
+                                scorer_id = str(event.get("playerId","") or
+                                               event.get("player",{}).get("id",""))
+                                if scorer_id == str(player_id):
+                                    goals += 1
+                                # Check if this player assisted
+                                assist_id = str(event.get("assistId","") or
+                                               event.get("assist",{}).get("id","") or
+                                               event.get("assistPlayerId",""))
+                                if assist_id and assist_id == str(player_id):
+                                    assists += 1
 
-                                    if not found:
-                                        log.warning(f"  player {player_id} not found in match {match_id}")
-                            else:
-                                log.warning(f"  matchDetails {match_id}: HTTP {resp.status}")
-                    except Exception as e:
-                        log.warning(f"  match {match_id} error: {e}")
+                        log.info(f"  player {player_id}: {goals}G {assists}A in match {match_id}")
 
-                utc = match.get("status", {}).get("utcTime", "") or match.get("utcTime", "")
-                games.append({
-                    "opponent": opponent,
-                    "result":   result,
-                    "score":    score,
-                    "xa":       xa_val,
-                    "minutes":  int(minutes),
-                    "date":     utc[:10] if utc else "",
-                })
+                except Exception as e:
+                    log.warning(f"  match {match_id} events error: {e}")
+
+            utc = match.get("status", {}).get("utcTime", "") or match.get("utcTime", "")
+            games.append({
+                "opponent": opponent,
+                "result":   result,
+                "score":    score,
+                "goals":    goals,
+                "assists":  assists,
+                "date":     utc[:10] if utc else "",
+            })
     except Exception as e:
         log.error(f"player_l5 {player_name}: {e}")
 
@@ -860,6 +835,49 @@ def match_screen(match_id):
     return jsonify(result)
 
 
+# ── Standings endpoint ───────────────────────────────────────────────────────
+
+@app.route("/standings")
+def standings():
+    """Return full team standings data by league."""
+    all_players = _cache.get("all_players", [])
+    teams       = _cache.get("teams", [])
+
+    if not teams:
+        return jsonify({"error": "No data yet — call /refresh first"}), 503
+
+    import pandas as pd
+    teams_df = pd.DataFrame(teams) if teams else pd.DataFrame()
+
+    by_league = {}
+    for league_name in LEAGUES:
+        lg = [t for t in teams if t.get("league") == league_name]
+        if not lg: continue
+        # Sort by table position
+        lg_sorted = sorted(lg, key=lambda x: safe_float(x.get("table_pos", 99)))
+        by_league[league_name] = [{
+            "team":       t["team"],
+            "team_id":    t["team_id"],
+            "table_pos":  t.get("table_pos", ""),
+            "played":     t.get("played", 0),
+            "gf_pg":      t.get("gf_pg", 0),
+            "ga_pg":      t.get("ga_pg", 0),
+            "gf_h_pg":    t.get("gf_h_pg", 0),
+            "ga_h_pg":    t.get("ga_h_pg", 0),
+            "gf_a_pg":    t.get("gf_a_pg", 0),
+            "ga_a_pg":    t.get("ga_a_pg", 0),
+            "home_adv":   t.get("home_adv", 0),
+            "away_vuln":  t.get("away_vuln", 0),
+            "weak_def":   t.get("weak_def", False),
+            "team_logo":  team_logo_url(t.get("team_id","")),
+        } for t in lg_sorted]
+
+    return jsonify({
+        "last_updated": _cache["last_updated"],
+        "standings":    by_league,
+    })
+
+
 # ── Player detail endpoint ───────────────────────────────────────────────────
 
 @app.route("/player/<player_id>")
@@ -882,7 +900,7 @@ def player_detail(player_id):
         from fotmob import FotMob
         async def fetch():
             async with FotMob() as fotmob:
-                return await get_player_l5_xa(fotmob, player_id, team_id, player_name)
+                return await get_player_l5(fotmob, player_id, team_id, player_name)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         l5_games = loop.run_until_complete(fetch())
