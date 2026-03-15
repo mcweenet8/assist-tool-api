@@ -372,8 +372,8 @@ async def get_fixtures_for_dates(fotmob, days=7):
     id_to_league = {str(info.get("fixture_id", info["id"])): ln for ln, info in LEAGUES.items()}
 
     today = datetime.utcnow()
-    # Include yesterday for recent results
-    dates = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(-1, days)]
+    # Include 2 days back to catch timezone differences + recent results
+    dates = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(-2, days)]
 
     for date_str in dates:
         await asyncio.sleep(0.4)
