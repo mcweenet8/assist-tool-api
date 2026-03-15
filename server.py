@@ -1141,6 +1141,10 @@ def match_screen(match_id):
             if word_match: return word_match
         return []
 
+    # Build lookup dicts for GS and TSOA scores by player_id
+    gs_lookup   = {p["player_id"]: p for p in _cache.get("gs_all",   []) if p.get("player_id")}
+    tsoa_lookup = {p["player_id"]: p for p in _cache.get("tsoa_all", []) if p.get("player_id")}
+
     home_players = sorted(
         match_team(all_players, home_name, home_id),
         key=lambda x: x["score"], reverse=True)
@@ -1152,11 +1156,28 @@ def match_screen(match_id):
     top25_names = {p["player"] for p in _cache.get("top25", [])}
 
     def enrich(players, opp_ga):
-        return [{
-            **p,
-            "in_top25":    p["player"] in top25_names,
-            "weak_opp":    opp_ga >= WEAK_DEF_THRESH,
-        } for p in players]
+        enriched = []
+        for p in players:
+            pid = p.get("player_id","")
+            gs   = gs_lookup.get(pid, {})
+            tsoa = tsoa_lookup.get(pid, {})
+            enriched.append({
+                **p,
+                "in_top25":    p["player"] in top25_names,
+                "weak_opp":    opp_ga >= WEAK_DEF_THRESH,
+                # GS fields
+                "gs_score":           gs.get("gs_score"),
+                "xgot_gap":           gs.get("xgot_gap"),
+                "xg_per90":           gs.get("xg_per90"),
+                "sot_per90":          gs.get("sot_per90"),
+                "goals":              gs.get("goals"),
+                "big_chances_missed": gs.get("big_chances_missed"),
+                # TSOA fields
+                "tsoa_score":   tsoa.get("tsoa_score"),
+                "xa_per90":     tsoa.get("xa_per90") or p.get("xa_per90"),
+                "bc_combined":  tsoa.get("bc_combined"),
+            })
+        return enriched
 
     result = {
         "match_id":     match_id,
