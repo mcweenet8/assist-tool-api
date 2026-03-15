@@ -1480,6 +1480,9 @@ def live_match(match_id):
         # Each: {'title': 'Possession', 'stats': [62, 38], 'highlighted': 'home'}
         stats_block = data.get("stats", {})
         stats_raw   = stats_block.get("stats", []) if isinstance(stats_block, dict) else []
+        log.info(f"live {match_id} stats_raw len={len(stats_raw)}, first={str(stats_raw[0])[:200] if stats_raw else 'empty'}")
+        team_colors_raw = stats_block.get("teamColors", {})
+        log.info(f"live {match_id} teamColors={str(team_colors_raw)[:200]}")
         stats_out   = {}
         for stat in stats_raw:
             if not isinstance(stat, dict): continue
