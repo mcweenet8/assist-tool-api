@@ -1171,9 +1171,13 @@ def match_screen(match_id):
                 # GS fields
                 "gs_score":           gs.get("gs_score"),
                 "xgot_gap":           gs.get("xgot_gap"),
+                "xg":                 gs.get("xg"),
                 "xg_per90":           gs.get("xg_per90"),
+                "xgot":               gs.get("xgot"),
                 "sot_per90":          gs.get("sot_per90"),
+                "shots_per90":        gs.get("shots_per90"),
                 "goals":              gs.get("goals"),
+                "big_chances_missed": gs.get("big_chances_missed"),
                 "big_chances_missed": gs.get("big_chances_missed"),
                 # TSOA fields
                 "tsoa_score":   tsoa.get("tsoa_score"),
