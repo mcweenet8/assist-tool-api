@@ -1051,11 +1051,13 @@ def data():
 def fixtures():
     # Always fetch fresh fixtures from FotMob (live data)
     try:
+        from fotmob import FotMob
+        async def _fetch():
+            async with FotMob() as fotmob:
+                return await get_fixtures_for_dates(fotmob, days=7)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        from myfotmob import FotMob
-        fotmob = FotMob()
-        fresh_fixtures = loop.run_until_complete(get_fixtures_for_dates(fotmob, days=7))
+        fresh_fixtures = loop.run_until_complete(_fetch())
         loop.close()
         if fresh_fixtures:
             _cache["fixtures"] = fresh_fixtures
