@@ -1476,17 +1476,14 @@ def live_match(match_id):
                     "side":    side,
                 })
 
-        # Stats — flat list at data['stats']
-        # Each item: {'title': 'Possession', 'localizedTitle': '...', 'stats': [62, 38]}
-        stats_raw = data.get("stats", [])
-        if not isinstance(stats_raw, list):
-            # Try nested structure
-            stats_raw = data.get("stats", {}).get("stats", [])
-        stats_out = {}
-
+        # Stats: data['stats']['stats'] = list of stat items
+        # Each: {'title': 'Possession', 'stats': [62, 38], 'highlighted': 'home'}
+        stats_block = data.get("stats", {})
+        stats_raw   = stats_block.get("stats", []) if isinstance(stats_block, dict) else []
+        stats_out   = {}
         for stat in stats_raw:
             if not isinstance(stat, dict): continue
-            title = (stat.get("title","") or stat.get("localizedTitle","")).lower()
+            title = (stat.get("title","") or "").lower()
             vals  = stat.get("stats", [])
             if not isinstance(vals, list) or len(vals) < 2: continue
             h, a = safe_float(vals[0]), safe_float(vals[1])
@@ -1500,31 +1497,28 @@ def live_match(match_id):
                 stats_out["xg"] = [round(h,2), round(a,2)]
         log.info(f"live {match_id} stats found: {list(stats_out.keys())}")
 
-        def get_color(team):
-            # Try multiple color fields FotMob uses
-            c = team.get("color") or team.get("teamColors",{}).get("fontColor") or                 team.get("teamColors",{}).get("color") or ""
-            if c and not c.startswith("#"): c = f"#{c}"
-            return c or None
+        # Colors: data['stats']['teamColors'] = {'home': '#RRGGBB', 'away': '#RRGGBB'}
+        team_colors = stats_block.get("teamColors", {}) if isinstance(stats_block, dict) else {}
+        home_color  = team_colors.get("home") or team_colors.get("homeColor")
+        away_color  = team_colors.get("away") or team_colors.get("awayColor")
+        if home_color and not home_color.startswith("#"): home_color = f"#{home_color}"
+        if away_color and not away_color.startswith("#"): away_color = f"#{away_color}"
 
-        home_color = get_color(home_data)
-        away_color = get_color(away_data)
+        # Score: data['home']['score'] / data['away']['score']
+        home_score = safe_float(home_data.get("score", 0))
+        away_score = safe_float(away_data.get("score", 0))
 
-        # Log full data structure for debugging first time
-        log.info(f"live {match_id}: {len(events)} events, stats={list(stats_out.keys())}, colors={home_color},{away_color}")
-        if not events and not stats_out:
-            # Log raw structure to help debug
-            log.warning(f"live {match_id} raw mf keys: {list(mf.keys())}")
-            log.warning(f"live {match_id} raw stats groups: {len(stats_raw)}")
-            if stats_raw:
-                log.warning(f"live first group: {str(stats_raw[0])[:200]}")
+        # Minute: data['liveTime']['short']
+        live_time  = data.get("liveTime", {}) or {}
+        minute     = live_time.get("short","") or live_time.get("long","")
+
+        log.info(f"live {match_id}: {len(events)} events, stats={list(stats_out.keys())}, colors={home_color},{away_color}, score={home_score}-{away_score}")
 
         return jsonify({
             "events":     events,
             "stats":      stats_out,
-            "minute":     (data.get("liveTime",{}) or {}).get("short","") or
-                           (data.get("status",{}) or {}).get("liveTime",""),
-            "score":      [safe_float(data.get("homeScore",{}).get("current",0) if isinstance(data.get("homeScore"),dict) else data.get("homeScore",0)),
-                           safe_float(data.get("awayScore",{}).get("current",0) if isinstance(data.get("awayScore"),dict) else data.get("awayScore",0))],
+            "minute":     minute,
+            "score":      [int(home_score), int(away_score)],
             "home_color": home_color,
             "away_color": away_color,
         })
