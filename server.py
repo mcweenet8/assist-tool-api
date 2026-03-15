@@ -1049,6 +1049,18 @@ def data():
 
 @app.route("/fixtures")
 def fixtures():
+    # Always fetch fresh fixtures from FotMob (live data)
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        from myfotmob import FotMob
+        fotmob = FotMob()
+        fresh_fixtures = loop.run_until_complete(get_fixtures_for_dates(fotmob, days=7))
+        loop.close()
+        if fresh_fixtures:
+            _cache["fixtures"] = fresh_fixtures
+    except Exception as e:
+        log.error(f"fixtures live fetch failed: {e}")
     if not _cache["fixtures"]:
         return jsonify({"error": "No fixtures yet — call /refresh first"}), 503
     return jsonify({
@@ -1351,7 +1363,8 @@ async def af_fixture_id(home_team, away_team, match_date):
                         return None
                     data = await resp.json(content_type=None)
             fixtures = data.get("response", [])
-            _fixtures_cache[date_str] = fixtures
+            if fixtures:  # Only cache non-empty results
+                _fixtures_cache[date_str] = fixtures
             log.info(f"AF: fetched {len(fixtures)} fixtures for {date_str} (cached)")
         def clean_name(s):
             return (s.lower()
