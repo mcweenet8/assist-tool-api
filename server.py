@@ -1050,26 +1050,6 @@ def data():
 
 @app.route("/fixtures")
 def fixtures():
-    # Refresh fixtures if cache is older than 5 minutes
-    cached_fixtures = _cache.get("fixtures")
-    last_fix = _cache.get("fixtures_updated")
-    age_mins = (datetime.now() - last_fix).total_seconds() / 60 if last_fix else 999
-    if not cached_fixtures or age_mins > 5:
-        try:
-            from fotmob import FotMob
-            async def _fetch():
-                async with FotMob() as fotmob:
-                    return await get_fixtures_for_dates(fotmob, days=7)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            fresh = loop.run_until_complete(_fetch())
-            loop.close()
-            if fresh:
-                _cache["fixtures"] = fresh
-                _cache["fixtures_updated"] = datetime.now()
-                log.info(f"fixtures refreshed, age was {age_mins:.1f}m")
-        except Exception as e:
-            log.error(f"fixtures live fetch failed: {e}")
     if not _cache["fixtures"]:
         return jsonify({"error": "No fixtures yet — call /refresh first"}), 503
     return jsonify({
