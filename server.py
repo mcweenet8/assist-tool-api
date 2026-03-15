@@ -85,6 +85,9 @@ _cache = {
     "gs_top25":      [],
     "gs_all":        [],
     "gs_by_league":  {},
+    "tsoa_top25":    [],
+    "tsoa_all":      [],
+    "tsoa_by_league":{},
     "teams":         [],   # team list with ga_pg for weak def lookup
     "status":        "never_run",
 }
@@ -96,6 +99,25 @@ def safe_float(v):
         return float(str(v).replace(",","").strip()) if v not in [None,""," ","-","N/A"] else 0.0
     except:
         return 0.0
+
+def tsoa_score(xg_per90, xa_per90, xgot_gap, xa_gap, bc_combined):
+    """TSOA score — rewards dual threats (scorers AND creators)."""
+    raw = (
+        (xg_per90   * 0.25) +
+        (xa_per90   * 0.25) +
+        (xgot_gap   * 0.20) +
+        (xa_gap     * 0.20) +
+        (bc_combined * 0.10)
+    )
+    # Dual threat multiplier — penalizes one-dimensional players
+    if xg_per90 > 0 and xa_per90 > 0:
+        dual = min(xg_per90, xa_per90) / max(xg_per90, xa_per90)
+    elif xg_per90 > 0 or xa_per90 > 0:
+        dual = 0.4  # one-dimensional player
+    else:
+        return 0.0
+    return round(raw * (0.5 + dual * 0.5), 2)
+
 
 def gs_score(xgot_gap, sot_per90, xg_per90, big_chances_missed):
     """Goal scorer score formula."""
@@ -897,8 +919,99 @@ async def run_scraper():
 
     log.info(f"Goal scorer: {len(gs_top25_list)} top25, {len(gs_all_list)} total")
 
+    # ── TSOA aggregation — join assist + GS data by player_id ────────────────
+    tsoa_top25_list   = []
+    tsoa_all_list     = []
+    tsoa_by_league    = {}
+
+    if not df.empty and not gs_df.empty:
+        # Build lookup dicts keyed by player_id
+        assist_lookup = {}
+        for _, row in df.iterrows():
+            pid = str(row.get("player_id",""))
+            if pid:
+                assist_lookup[pid] = row
+
+        gs_lookup = {}
+        for _, row in gs_df.iterrows():
+            pid = str(row.get("player_id",""))
+            if pid:
+                gs_lookup[pid] = row
+
+        # Union of all player_ids
+        all_pids = set(assist_lookup.keys()) | set(gs_lookup.keys())
+
+        tsoa_rows = []
+        for pid in all_pids:
+            ar = assist_lookup.get(pid)
+            gr = gs_lookup.get(pid)
+
+            # Get base info from whichever source has it
+            base = ar if ar is not None else gr
+            tname   = str(base.get("team",""))
+            tid     = str(base.get("team_id",""))
+            league  = str(base.get("league","") or tlg.get(tid,""))
+            player  = str(base.get("player",""))
+
+            # Extract metrics from each side
+            xg_per90  = safe_float(gr.get("xg_per90",0))  if gr is not None else 0.0
+            xgot_gap  = safe_float(gr.get("xgot_gap",0))  if gr is not None else 0.0
+            xa_per90  = safe_float(ar.get("xa_per90",0))  if ar is not None else 0.0
+            xa_gap    = safe_float(ar.get("xa_gap",0))     if ar is not None else 0.0
+            big_chances      = safe_float(ar.get("big_chances",0))       if ar is not None else 0.0
+            big_chances_miss = safe_float(gr.get("big_chances_missed",0)) if gr is not None else 0.0
+            bc_combined = big_chances + big_chances_miss
+
+            score = tsoa_score(xg_per90, xa_per90, xgot_gap, xa_gap, bc_combined)
+            if score <= 0: continue
+
+            form     = team_form.get(tname, [])
+            next_opp = team_next_opp.get(tname)
+
+            tsoa_rows.append({
+                "player":        player,
+                "player_id":     pid,
+                "team":          tname,
+                "team_id":       tid,
+                "league":        league,
+                "tsoa_score":    score,
+                "xg_per90":      round(xg_per90, 2),
+                "xa_per90":      round(xa_per90, 2),
+                "xgot_gap":      round(xgot_gap, 2),
+                "xa_gap":        round(xa_gap, 2),
+                "bc_combined":   int(bc_combined),
+                "goals":         int(safe_float(gr.get("goals",0))) if gr is not None else 0,
+                "assists":       int(safe_float(ar.get("assists",0))) if ar is not None else 0,
+                "form":          form,
+                "form_score":    form_score(form),
+                "next_opponent": next_opp.get("opponent") if next_opp else None,
+                "next_kickoff":  next_opp.get("kickoff")  if next_opp else None,
+                "weak_opp_def":  next_opp.get("weak_def") if next_opp else False,
+                "player_img":    player_img_url(pid),
+                "team_logo":     team_logo_url(tid),
+            })
+
+        tsoa_rows.sort(key=lambda x: x["tsoa_score"], reverse=True)
+        tsoa_top25_list = tsoa_rows[:25]
+        tsoa_all_list   = tsoa_rows
+
+        for p in tsoa_rows:
+            lg = p["league"]
+            if not lg: continue
+            if lg not in tsoa_by_league: tsoa_by_league[lg] = {}
+            tm = p["team"]
+            if tm not in tsoa_by_league[lg]: tsoa_by_league[lg][tm] = []
+            tsoa_by_league[lg][tm].append(p)
+
+        tsoa_by_league = {
+            lg: [{"team": tm, "players": pls} for tm, pls in sorted(tms.items())]
+            for lg, tms in tsoa_by_league.items()
+        }
+
+    log.info(f"TSOA: {len(tsoa_top25_list)} top25, {len(tsoa_all_list)} total")
+
     log.info(f"Scraper done — {len(top25_list)} players, {len(by_league)} leagues: {list(by_league.keys())}")
-    return top25_list, by_league, fixtures, all_players_list, teams_list, gs_top25_list, gs_all_list, gs_by_league
+    return top25_list, by_league, fixtures, all_players_list, teams_list, gs_top25_list, gs_all_list, gs_by_league, tsoa_top25_list, tsoa_all_list, tsoa_by_league
 
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
@@ -926,9 +1039,12 @@ def data():
         "top25":        _cache["top25"],
         "by_league":    _cache["by_league"],
         "all_players":  _cache.get("all_players", []),
-        "gs_top25":     _cache.get("gs_top25", []),
-        "gs_all":       _cache.get("gs_all", []),
-        "gs_by_league": _cache.get("gs_by_league", {}),
+        "gs_top25":      _cache.get("gs_top25", []),
+        "gs_all":        _cache.get("gs_all", []),
+        "gs_by_league":  _cache.get("gs_by_league", {}),
+        "tsoa_top25":    _cache.get("tsoa_top25", []),
+        "tsoa_all":      _cache.get("tsoa_all", []),
+        "tsoa_by_league":_cache.get("tsoa_by_league", {}),
     })
 
 @app.route("/fixtures")
@@ -947,7 +1063,7 @@ def refresh():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        top25, by_league, fixtures, all_players_full, teams_list, gs_top25, gs_all, gs_by_league = loop.run_until_complete(run_scraper())
+        top25, by_league, fixtures, all_players_full, teams_list, gs_top25, gs_all, gs_by_league, tsoa_top25, tsoa_all, tsoa_by_league = loop.run_until_complete(run_scraper())
         loop.close()
         _cache["top25"]        = top25
         _cache["by_league"]    = by_league
@@ -956,9 +1072,12 @@ def refresh():
         _cache["status"]       = "ok"
         _cache["all_players"]  = all_players_full
         _cache["teams"]        = teams_list
-        _cache["gs_top25"]     = gs_top25
-        _cache["gs_all"]       = gs_all
-        _cache["gs_by_league"] = gs_by_league
+        _cache["gs_top25"]      = gs_top25
+        _cache["gs_all"]        = gs_all
+        _cache["gs_by_league"]  = gs_by_league
+        _cache["tsoa_top25"]    = tsoa_top25
+        _cache["tsoa_all"]      = tsoa_all
+        _cache["tsoa_by_league"]= tsoa_by_league
         return jsonify({
             "success":      True,
             "last_updated": _cache["last_updated"],
@@ -1500,10 +1619,11 @@ def live_match(match_id):
                 stats_out["xg"] = [round(h,2), round(a,2)]
         log.info(f"live {match_id} stats found: {list(stats_out.keys())}")
 
-        # Colors: data['stats']['teamColors'] = {'home': '#RRGGBB', 'away': '#RRGGBB'}
-        team_colors = stats_block.get("teamColors", {}) if isinstance(stats_block, dict) else {}
-        home_color  = team_colors.get("home") or team_colors.get("homeColor")
-        away_color  = team_colors.get("away") or team_colors.get("awayColor")
+        # Colors: data['stats']['teamColors']['darkMode'] = {'home': '#...', 'away': '#...'}
+        team_colors  = stats_block.get("teamColors", {}) if isinstance(stats_block, dict) else {}
+        dark_colors  = team_colors.get("darkMode", {})
+        home_color   = dark_colors.get("home") or team_colors.get("home")
+        away_color   = dark_colors.get("away") or team_colors.get("away")
         if home_color and not home_color.startswith("#"): home_color = f"#{home_color}"
         if away_color and not away_color.startswith("#"): away_color = f"#{away_color}"
 
