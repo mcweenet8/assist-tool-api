@@ -1113,10 +1113,13 @@ def match_screen(match_id):
     if not all_players:
         return jsonify({"error": "No data yet — call /refresh first"}), 503
 
-    # Build team GA/G lookup
-    ga_lookup = {t["team_id"]: t["ga_pg"] for t in teams}
-    home_ga   = ga_lookup.get(home_id, 0)
-    away_ga   = ga_lookup.get(away_id, 0)
+    # Build team GA/G lookup + full team stats
+    ga_lookup   = {t["team_id"]: t["ga_pg"] for t in teams}
+    team_lookup = {t["team_id"]: t for t in teams}
+    home_ga     = ga_lookup.get(home_id, 0)
+    away_ga     = ga_lookup.get(away_id, 0)
+    home_stats  = team_lookup.get(home_id, {})
+    away_stats  = team_lookup.get(away_id, {})
 
     # Fuzzy team name matching — fixture names often differ from standings names
     # e.g. "Man Utd" vs "Manchester United", "Spurs" vs "Tottenham"
@@ -1185,10 +1188,12 @@ def match_screen(match_id):
         "away":         away_name,
         "home_id":      home_id,
         "away_id":      away_id,
-        "home_ga_pg":   home_ga,
-        "away_ga_pg":   away_ga,
+        "home_ga_pg":    home_ga,
+        "away_ga_pg":    away_ga,
         "home_weak_def": home_ga >= WEAK_DEF_THRESH,
         "away_weak_def": away_ga >= WEAK_DEF_THRESH,
+        "home_stats":    home_stats,
+        "away_stats":    away_stats,
         "home_players": enrich(home_players, away_ga),   # away = opponent of home players
         "away_players": enrich(away_players, home_ga),   # home = opponent of away players
         "lineups":      None,
