@@ -375,12 +375,14 @@ async def get_fixtures_for_dates(fotmob, days=7):
     today = datetime.utcnow()
     # Include 2 days back to catch timezone differences + recent results
     dates = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(-2, days)]
+    log.info(f"Fetching fixtures for dates: {dates[:4]}...")
 
     for date_str in dates:
         await asyncio.sleep(0.4)
         try:
             data = await fotmob.get_matches_by_date(date_str)
             leagues = data.get("leagues", []) if isinstance(data, dict) else []
+            matched = 0
             for league in leagues:
                 if not isinstance(league, dict): continue
                 lid = str(league.get("id", ""))
@@ -421,8 +423,11 @@ async def get_fixtures_for_dates(fotmob, days=7):
                         "score":      f"{home.get('score','-')} - {away.get('score','-')}" if (live or finished) else None,
                         "minute":     status.get("liveTime", {}).get("short", "") if live else None,
                     })
+                    matched += 1
         except Exception as e:
             log.error(f"fixtures {date_str}: {e}")
+        else:
+            log.info(f"fixtures {date_str}: {matched} matched")
 
     # Sort each league by kickoff
     for ln in fixtures_by_league:
