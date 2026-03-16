@@ -34,6 +34,13 @@ LEAGUES = {
     "A-League Men":   {"id": 901954, "short": "ALeague", "fixture_id": 901954},
 }
 
+# Fixtures only — no player stats scraping
+FIXTURE_ONLY_LEAGUES = {
+    "Champions League":  {"id": 42,    "short": "UCL"},
+    "Europa League":     {"id": 73,    "short": "UEL"},
+    "Conference League": {"id": 10216, "short": "UECL"},
+}
+
 STATS = {
     "goal_assist":             "assists",
     "expected_assists":        "xa",
@@ -367,10 +374,12 @@ async def get_next_opponent(fotmob, team_id, team_name, teams_df):
 
 async def get_fixtures_for_dates(fotmob, days=7):
     """Get live + upcoming fixtures for the next N days across all leagues."""
-    fixtures_by_league = {ln: [] for ln in LEAGUES}
+    # Combine regular leagues + fixture-only leagues
+    all_fixture_leagues = {**LEAGUES, **FIXTURE_ONLY_LEAGUES}
+    fixtures_by_league = {ln: [] for ln in all_fixture_leagues}
     # Use fixture_id if defined (some leagues use different IDs for fixtures vs standings)
-    league_ids   = set(str(info.get("fixture_id", info["id"])) for info in LEAGUES.values())
-    id_to_league = {str(info.get("fixture_id", info["id"])): ln for ln, info in LEAGUES.items()}
+    league_ids   = set(str(info.get("fixture_id", info["id"])) for info in all_fixture_leagues.values())
+    id_to_league = {str(info.get("fixture_id", info["id"])): ln for ln, info in all_fixture_leagues.items()}
 
     today = datetime.utcnow()
     # Include 2 days back to catch timezone differences + recent results
