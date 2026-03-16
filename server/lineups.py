@@ -110,10 +110,6 @@ async def af_lineups(fixture_id):
     except Exception as e:
         log.error(f"af_lineups {fixture_id}: {e}")
         return None
-Done
-Step 4: Commit changes.
-
-Tell me when done.
 
 
 
