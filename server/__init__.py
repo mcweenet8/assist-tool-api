@@ -1,1 +1,1 @@
-# Deep Current Football API — server package
+from .main import app
