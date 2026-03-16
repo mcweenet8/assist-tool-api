@@ -97,4 +97,3 @@ def safe_float(v):
             if v not in [None, "", " ", "-", "N/A"] else 0.0
     except:
         return 0.0
-Done
