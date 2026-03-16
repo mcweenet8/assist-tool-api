@@ -46,7 +46,3 @@ def form_score(last5):
         return None
     pts = sum({"w": 1.0, "d": 0.5, "l": 0.0}.get(r.lower(), 0) for r in last5)
     return round(pts / len(last5), 2)
-
-
-
-Want to be notified when
