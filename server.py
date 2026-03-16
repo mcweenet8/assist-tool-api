@@ -121,10 +121,10 @@ def tsoa_score(xg_per90, xa_per90, xgot_gap, xa_gap, bc_combined):
     if xg_per90 > 0 and xa_per90 > 0:
         dual = min(xg_per90, xa_per90) / max(xg_per90, xa_per90)
     elif xg_per90 > 0 or xa_per90 > 0:
-        dual = 0.4  # one-dimensional player
+        dual = 0.6  # one-dimensional player
     else:
         return 0.0
-    return round(raw * (0.5 + dual * 0.5), 2)
+    return round(raw * (0.7 + dual * 0.3) * 2.0, 2)
 
 
 def gs_score(xgot_gap, sot_per90, xg_per90, big_chances_missed):
