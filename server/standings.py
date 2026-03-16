@@ -135,10 +135,7 @@ def build_team_row(t):
         "conference": t.get("conference", ""),
         "team_logo":  team_logo_url(t.get("team_id", "")),
     }
-Done
-Step 4: Commit changes.
 
-Tell me when done.
 
 
 
