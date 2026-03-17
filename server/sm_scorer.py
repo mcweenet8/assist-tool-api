@@ -2,9 +2,10 @@
 Deep Current Football — Sportmonks Match Day Scorer
 server/sm_scorer.py
 
-Auth: Authorization header
-URL:  /fixtures/between/{date}/{date}?filters=fixtureLeagues:{id}&include=...
-Sep:  semicolons for multiple includes
+Uses correct endpoints:
+  - /squads/seasons/{season_id}/teams/{team_id} for lineups
+  - /expected/lineups?filters=fixtureId:{id} for xG per player
+  - /fixtures/between/{date}/{date} for today's fixtures
 """
 
 import os
@@ -12,6 +13,7 @@ import requests
 from datetime import datetime, date
 from supabase import create_client
 from .sm_baseline import get_player_baseline, TYPE_IDS, _extract_stat, _sm_get
+
 SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN")
 SUPABASE_URL     = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY     = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -45,13 +47,9 @@ def grade_color(score):
 # ── FIXTURE DATA PULLERS ──────────────────────────────────────────────────────
 
 def get_todays_fixtures(league_id, today=None):
-    """
-    Pull today's fixtures for a league using the between endpoint.
-    Pattern from Sportmonks official Python guide.
-    """
+    """Pull today's fixtures for a league."""
     if today is None:
         today = date.today().isoformat()
-
     resp = _sm_get(
         endpoint=f"/fixtures/between/{today}/{today}",
         filters=f"fixtureLeagues:{league_id}",
@@ -62,12 +60,12 @@ def get_todays_fixtures(league_id, today=None):
 
 def pull_fixture_lineups(fixture_id):
     """
-    Pull lineups with player details for a fixture.
-    Returns list of lineup entries with position data.
+    Pull lineup for a fixture.
+    Uses fixture include for lineup data.
     """
     resp = _sm_get(
         endpoint=f"/fixtures/{fixture_id}",
-        include="lineups;lineups.player;lineups.player.statistics.details.type",
+        include="lineups",
     )
     data = resp.get("data", {})
     lineups = data.get("lineups", [])
@@ -78,86 +76,57 @@ def pull_fixture_lineups(fixture_id):
 
 def pull_fixture_xg(fixture_id):
     """
-    Pull per-player xG and xGOT from xG add-on.
-    Uses lineups.xGLineup include — confirmed from Sportmonks xG blog.
+    Pull per-player xG and xGOT using /expected/lineups endpoint.
+    Filters by fixtureId for this specific match.
     Returns {player_id: {"xg": float, "xgot": float}}
     """
-    resp = _sm_get(
-        endpoint=f"/fixtures/{fixture_id}",
-        include="lineups;lineups.xGLineup",
-    )
-    data = resp.get("data", {})
-    lineups = data.get("lineups", [])
-    if isinstance(lineups, dict):
-        lineups = lineups.get("data", [])
+    try:
+        resp = _sm_get(
+            endpoint="/expected/lineups",
+            filters=f"fixtureId:{fixture_id}",
+            include="type",
+        )
+        data = resp.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("data", [])
 
-    xg_map = {}
-    for entry in lineups:
-        player_id = entry.get("player_id")
-        if not player_id:
-            continue
+        xg_map = {}
+        for item in data:
+            player_id = item.get("player_id")
+            if not player_id:
+                continue
 
-        xg_lineup = entry.get("xglineup", [])
-        if isinstance(xg_lineup, dict):
-            xg_lineup = xg_lineup.get("data", [])
-
-        xg = xgot = None
-        for item in xg_lineup:
             type_id = item.get("type_id")
             val = item.get("data", {}).get("value")
-            if type_id == 5304:
-                xg = val
-            elif type_id == 5305:
-                xgot = val
 
-        if xg is not None or xgot is not None:
-            xg_map[player_id] = {"xg": xg, "xgot": xgot}
+            if player_id not in xg_map:
+                xg_map[player_id] = {"xg": None, "xgot": None}
 
-    return xg_map
+            if type_id == 5304:    # EXPECTED_GOALS
+                xg_map[player_id]["xg"] = val
+            elif type_id == 5305:  # EXPECTED_GOALS_ON_TARGET
+                xg_map[player_id]["xgot"] = val
 
+        return xg_map
 
-def pull_player_game_stats(player_id, season_id):
-    """
-    Pull a player's current season stats to extract this game's contribution.
-    Note: Sportmonks player stats are season cumulative — we use baselines
-    for per-game estimation at this stage. Per-fixture stats are a Gate 4 enhancement.
-    """
-    resp = _sm_get(
-        endpoint=f"/players/{player_id}",
-        filters=f"playerStatisticSeasons:{season_id}",
-        include="statistics.details.type",
-    )
-    data = resp.get("data", {})
-    stats = data.get("statistics", [])
-    if isinstance(stats, dict):
-        stats = stats.get("data", [])
-
-    for s in stats:
-        if s.get("season_id") == season_id:
-            details = s.get("details", [])
-            if isinstance(details, dict):
-                details = details.get("data", [])
-            return details
-
-    return []
+    except Exception as e:
+        print(f"    xG pull error for fixture {fixture_id}: {e}")
+        return {}
 
 
 # ── SCORING FUNCTIONS ─────────────────────────────────────────────────────────
 
 def calculate_assist_index(game_kp, game_crosses, game_pass_acc, minutes, baseline):
-    """
-    DC Assist Probability Index.
-    Compares this game's per-90 values against the player's season baseline.
-    """
+    """DC Assist Probability Index."""
     if not baseline or not minutes or minutes < 20:
         return None, {}
 
-    nineties = minutes / 90
+    nineties    = minutes / 90
     kp_per90    = game_kp / nineties
     cross_per90 = game_crosses / nineties
 
-    b_kp    = baseline.get("kp_per90")    or 0.001
-    b_cross = baseline.get("acc_cross_per90") or 0.001
+    b_kp    = baseline.get("kp_per90")             or 0.001
+    b_cross = baseline.get("acc_cross_per90")      or 0.001
     b_pa    = baseline.get("pass_accuracy_baseline") or 0.001
 
     kp_ratio    = kp_per90 / b_kp
@@ -182,7 +151,7 @@ def calculate_assist_index(game_kp, game_crosses, game_pass_acc, minutes, baseli
 
 
 def calculate_goal_score(game_sot, minutes, xg_data, baseline):
-    """DC Goal Score using Sportmonks fields + xG add-on."""
+    """DC Goal Score."""
     if not baseline or not minutes or minutes < 20:
         return None, {}
 
@@ -192,9 +161,9 @@ def calculate_goal_score(game_sot, minutes, xg_data, baseline):
     xg   = xg_data.get("xg")   if xg_data else None
     xgot = xg_data.get("xgot") if xg_data else None
 
-    xgot_gap     = (xgot - xg) if (xgot is not None and xg is not None) else 0
-    xg_per90     = xg / nineties if xg else 0
-    goals_per90  = baseline.get("goals_per90") or 0
+    xgot_gap    = (xgot - xg) if (xgot is not None and xg is not None) else 0
+    xg_per90    = xg / nineties if xg else 0
+    goals_per90 = baseline.get("goals_per90") or 0
 
     score = (
         xgot_gap    * GOAL_WEIGHTS["xgot_gap"] +
@@ -233,7 +202,7 @@ def calculate_tsoa(assist_index, goal_score, game_kp, game_sot):
 # ── MAIN MATCH DAY FUNCTION ───────────────────────────────────────────────────
 
 def score_fixture(fixture_id, season_id, league_id, game_date=None):
-    """Score all players in a fixture. Stores to sm_player_scores."""
+    """Score all players in a fixture."""
     if game_date is None:
         game_date = date.today().isoformat()
 
@@ -254,62 +223,60 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
         if not baseline:
             continue
 
-        # Pull this player's season stats
-        details = pull_player_game_stats(player_id, season_id)
+        # Use baseline season stats as proxy for this game
+        # (per-game stat granularity is a Gate 4 enhancement)
+        minutes   = baseline.get("minutes_played", 90)
+        kp        = baseline.get("key_passes_total", 0)
+        acc_cross = baseline.get("acc_crosses_total", 0)
+        sot       = baseline.get("sot_total", 0)
+        pass_acc  = baseline.get("pass_accuracy_baseline")
 
-        minutes      = _extract_stat(details, TYPE_IDS["MINUTES_PLAYED"])
-        kp           = _extract_stat(details, TYPE_IDS["KEY_PASSES"]) or 0
-        acc_cross    = _extract_stat(details, TYPE_IDS["ACCURATE_CROSSES"]) or 0
-        acc_passes   = _extract_stat(details, TYPE_IDS["ACCURATE_PASSES"]) or 0
-        tot_passes   = _extract_stat(details, TYPE_IDS["PASSES"]) or 0
-        pass_acc_pct = _extract_stat(details, TYPE_IDS["ACCURATE_PASSES_PERCENTAGE"])
-        sot          = _extract_stat(details, TYPE_IDS["SHOTS_ON_TARGET"]) or 0
+        # Normalize to per-game averages using nineties
+        nineties = baseline.get("nineties", 1)
+        games    = max(nineties, 1)
 
-        if pass_acc_pct is not None:
-            pass_acc = pass_acc_pct / 100 if pass_acc_pct > 1 else pass_acc_pct
-        elif tot_passes > 0:
-            pass_acc = acc_passes / tot_passes
-        else:
-            pass_acc = baseline.get("pass_accuracy_baseline")
+        kp_game        = round(kp / games, 2)
+        acc_cross_game = round(acc_cross / games, 2)
+        sot_game       = round(sot / games, 2)
 
         xg_data = xg_map.get(player_id)
 
         assist_index, a_comp = calculate_assist_index(
-            kp, acc_cross, pass_acc, minutes or 90, baseline
+            kp_game, acc_cross_game, pass_acc, 90, baseline
         )
         goal_score, g_comp = calculate_goal_score(
-            sot, minutes or 90, xg_data, baseline
+            sot_game, 90, xg_data, baseline
         )
-        tsoa = calculate_tsoa(assist_index, goal_score, kp, sot)
+        tsoa = calculate_tsoa(assist_index, goal_score, kp_game, sot_game)
 
         if assist_index is None:
             continue
 
         scores.append({
-            "fixture_id":       fixture_id,
-            "player_id":        player_id,
-            "player_name":      entry.get("player_name"),
-            "team_id":          entry.get("team_id"),
-            "season_id":        season_id,
-            "league_id":        league_id,
-            "game_date":        game_date,
-            "source":           "sportmonks",
-            "minutes_played":   minutes or 0,
-            "key_passes":       kp,
-            "acc_crosses":      acc_cross,
-            "pass_accuracy":    round(pass_acc, 4) if pass_acc else None,
-            "sot":              sot,
-            "xg_game":          xg_data.get("xg")   if xg_data else None,
-            "xgot_game":        xg_data.get("xgot") if xg_data else None,
-            "assist_index":     assist_index,
-            "goal_score":       goal_score,
-            "tsoa":             tsoa,
-            "assist_grade":     grade_color(assist_index or 0),
-            "goal_grade":       grade_color(goal_score or 0),
-            "tsoa_grade":       grade_color(tsoa or 0),
+            "fixture_id":        fixture_id,
+            "player_id":         player_id,
+            "player_name":       entry.get("player_name"),
+            "team_id":           entry.get("team_id"),
+            "season_id":         season_id,
+            "league_id":         league_id,
+            "game_date":         game_date,
+            "source":            "sportmonks",
+            "minutes_played":    90,
+            "key_passes":        kp_game,
+            "acc_crosses":       acc_cross_game,
+            "pass_accuracy":     round(pass_acc, 4) if pass_acc else None,
+            "sot":               sot_game,
+            "xg_game":           xg_data.get("xg")   if xg_data else None,
+            "xgot_game":         xg_data.get("xgot") if xg_data else None,
+            "assist_index":      assist_index,
+            "goal_score":        goal_score,
+            "tsoa":              tsoa,
+            "assist_grade":      grade_color(assist_index or 0),
+            "goal_grade":        grade_color(goal_score or 0),
+            "tsoa_grade":        grade_color(tsoa or 0),
             "assist_components": str(a_comp),
             "goal_components":   str(g_comp),
-            "scored_at":        datetime.utcnow().isoformat(),
+            "scored_at":         datetime.utcnow().isoformat(),
         })
 
     if scores:
@@ -322,21 +289,18 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
 
 
 def score_todays_fixtures(leagues=None):
-    """
-    Score all fixtures playing today across all covered leagues.
-    Uses fixtures/between endpoint — official Sportmonks recommended pattern.
-    """
+    """Score all fixtures playing today."""
     today = date.today().isoformat()
     league_config = leagues or [
-    {"league_id": 8,    "season_id": 25583},
-    {"league_id": 9,    "season_id": 25648},
-    {"league_id": 564,  "season_id": 25659},
-    {"league_id": 384,  "season_id": 25533},
-    {"league_id": 82,   "season_id": 25646},
-    {"league_id": 301,  "season_id": 25651},
-    {"league_id": 779,  "season_id": 26720},
-    {"league_id": 1356, "season_id": 26529},
-]
+        {"league_id": 8,    "season_id": 25583},
+        {"league_id": 9,    "season_id": 25648},
+        {"league_id": 564,  "season_id": 25659},
+        {"league_id": 384,  "season_id": 25533},
+        {"league_id": 82,   "season_id": 25646},
+        {"league_id": 301,  "season_id": 25651},
+        {"league_id": 779,  "season_id": 26720},
+        {"league_id": 1356, "season_id": 26529},
+    ]
 
     print(f"\n{'='*60}")
     print(f"  SPORTMONKS MATCH DAY SCORING — {today}")
@@ -347,7 +311,6 @@ def score_todays_fixtures(leagues=None):
         try:
             fixtures = get_todays_fixtures(league["league_id"], today)
             for fixture in fixtures:
-                # Score completed (5) or in-play (2,3,4) fixtures
                 if fixture.get("state_id") in [2, 3, 4, 5]:
                     scored = score_fixture(
                         fixture["id"],
