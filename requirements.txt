@@ -5,3 +5,5 @@ pandas
 gunicorn
 fotmob-wrapper
 requests
+supabase
+requests
