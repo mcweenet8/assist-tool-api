@@ -29,14 +29,14 @@ BASE_URL         = "https://api.sportmonks.com/v3/football"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 LEAGUES = [
-    {"league_id": 8,    "season_id": 23614, "name": "Premier League"},
-    {"league_id": 5,    "season_id": 23599, "name": "Championship"},
-    {"league_id": 564,  "season_id": 23686, "name": "La Liga"},
-    {"league_id": 384,  "season_id": 23615, "name": "Serie A"},
-    {"league_id": 82,   "season_id": 23538, "name": "Bundesliga"},
-    {"league_id": 301,  "season_id": 23611, "name": "Ligue 1"},
-    {"league_id": 1351, "season_id": 23700, "name": "MLS"},
-    {"league_id": 174,  "season_id": 23645, "name": "A-League Men"},
+    {"league_id": 8,    "season_id": 25583, "name": "Premier League"},
+    {"league_id": 9,    "season_id": 25648, "name": "Championship"},
+    {"league_id": 564,  "season_id": 25659, "name": "La Liga"},
+    {"league_id": 384,  "season_id": 25533, "name": "Serie A"},
+    {"league_id": 82,   "season_id": 25646, "name": "Bundesliga"},
+    {"league_id": 301,  "season_id": 25651, "name": "Ligue 1"},
+    {"league_id": 779,  "season_id": 26720, "name": "MLS"},
+    {"league_id": 1356, "season_id": 26529, "name": "A-League Men"},
 ]
 
 TYPE_IDS = {
