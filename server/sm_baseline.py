@@ -2,7 +2,16 @@
 Deep Current Football — Sportmonks Season Baseline Builder
 server/sm_baseline.py
 
-Auth: Authorization header (official Sportmonks pattern)
+REWRITE: Pulls players by team roster, not global player search.
+This keeps the data scoped to current season squads only.
+
+Flow:
+  1. Get all teams in a league/season
+  2. For each team, get their squad
+  3. For each player in squad, get their season stats
+  4. Calculate and store per-90 baselines
+
+Auth: Authorization header
 URL:  BASE_URL + endpoint + ?filters=...&include=...
 Sep:  semicolons for multiple includes
 """
@@ -48,15 +57,8 @@ TYPE_IDS = {
 
 
 def _sm_get(endpoint, filters=None, include=None, extra_params=None, page=None):
-    """
-    Core Sportmonks API GET helper.
-
-    Uses Authorization header — official Sportmonks recommended auth pattern.
-    Filters and includes passed as separate query params.
-    Multiple includes separated by semicolons.
-    """
+    """Core Sportmonks API GET helper using Authorization header."""
     headers = {"Authorization": SPORTMONKS_TOKEN}
-
     params = {}
     if filters:
         params["filters"] = filters
@@ -90,57 +92,69 @@ def _extract_stat(details, type_id):
     return None
 
 
-def _get_players_for_season(season_id):
-    """Pull all player season stats with pagination."""
-    print(f"    Fetching players for season {season_id}...")
-    all_players = []
-    page = 1
-
-    while True:
-        try:
-            resp = _sm_get(
-                endpoint="/players",
-                filters=f"playerStatisticSeasons:{season_id}",
-                include="statistics.details.type",
-                extra_params={"per_page": 25},
-                page=page,
-            )
-        except Exception as e:
-            print(f"    Error on page {page}: {e}")
-            break
-
-        data = resp.get("data", [])
-        if not data:
-            break
-
-        all_players.extend(data)
-
-        if not resp.get("pagination", {}).get("has_more", False):
-            break
-
-        page += 1
-        print(f"    Page {page - 1} — {len(all_players)} players so far...")
-
-    return all_players
+def _get_teams_for_season(season_id):
+    """Get all team IDs participating in a season."""
+    try:
+        resp = _sm_get(
+            endpoint=f"/seasons/{season_id}",
+            include="participants",
+        )
+        data = resp.get("data", {})
+        participants = data.get("participants", [])
+        if isinstance(participants, dict):
+            participants = participants.get("data", [])
+        return [p.get("id") for p in participants if p.get("id")]
+    except Exception as e:
+        print(f"    Error getting teams for season {season_id}: {e}")
+        return []
 
 
-def _calculate_baseline(player, season_id):
-    """Extract per-90 baselines from a player's season stats."""
-    stats = player.get("statistics", [])
-    if isinstance(stats, dict):
-        stats = stats.get("data", [])
+def _get_squad_for_team(team_id, season_id):
+    """Get all players in a team's squad for a season."""
+    try:
+        resp = _sm_get(
+            endpoint=f"/teams/{team_id}",
+            include="players",
+            filters=f"playerStatisticSeasons:{season_id}",
+        )
+        data = resp.get("data", {})
+        players = data.get("players", [])
+        if isinstance(players, dict):
+            players = players.get("data", [])
+        return players
+    except Exception as e:
+        print(f"    Error getting squad for team {team_id}: {e}")
+        return []
 
-    season_stat = next(
-        (s for s in stats if s.get("season_id") == season_id and s.get("has_values")),
-        None
-    )
-    if not season_stat:
-        return None
 
-    details = season_stat.get("details", [])
-    if isinstance(details, dict):
-        details = details.get("data", [])
+def _get_player_season_stats(player_id, season_id):
+    """Get a single player's season stats with details."""
+    try:
+        resp = _sm_get(
+            endpoint=f"/players/{player_id}",
+            include="statistics.details.type",
+            filters=f"playerStatisticSeasons:{season_id}",
+        )
+        data = resp.get("data", {})
+        stats = data.get("statistics", [])
+        if isinstance(stats, dict):
+            stats = stats.get("data", [])
 
+        # Find the matching season
+        for s in stats:
+            if s.get("season_id") == season_id and s.get("has_values"):
+                details = s.get("details", [])
+                if isinstance(details, dict):
+                    details = details.get("data", [])
+                return data, details
+
+        return data, []
+    except Exception as e:
+        return {}, []
+
+
+def _calculate_baseline(player_data, details, season_id):
+    """Calculate per-90 baselines from a player's season stats."""
     minutes      = _extract_stat(details, TYPE_IDS["MINUTES_PLAYED"])
     key_passes   = _extract_stat(details, TYPE_IDS["KEY_PASSES"])
     acc_crosses  = _extract_stat(details, TYPE_IDS["ACCURATE_CROSSES"])
@@ -151,6 +165,7 @@ def _calculate_baseline(player, season_id):
     goals        = _extract_stat(details, TYPE_IDS["GOALS"])
     dribbles     = _extract_stat(details, TYPE_IDS["SUCCESSFUL_DRIBBLES"])
 
+    # Skip players with less than 90 minutes
     if not minutes or minutes < 90:
         return None
 
@@ -159,19 +174,22 @@ def _calculate_baseline(player, season_id):
     def per90(val):
         return round(val / nineties, 3) if val else 0.0
 
+    # Pass accuracy
     if pass_acc_pct is not None:
-        pass_accuracy = round(pass_acc_pct / 100 if pass_acc_pct > 1 else pass_acc_pct, 4)
+        pass_accuracy = round(
+            pass_acc_pct / 100 if pass_acc_pct > 1 else pass_acc_pct, 4
+        )
     elif acc_passes and tot_passes and tot_passes > 0:
         pass_accuracy = round(acc_passes / tot_passes, 4)
     else:
         pass_accuracy = None
 
     return {
-        "player_id":              player.get("id"),
-        "player_name":            player.get("display_name") or player.get("name"),
+        "player_id":              player_data.get("id"),
+        "player_name":            player_data.get("display_name") or player_data.get("name"),
         "season_id":              season_id,
-        "position_id":            player.get("position_id"),
-        "detailed_position_id":   player.get("detailed_position_id"),
+        "position_id":            player_data.get("position_id"),
+        "detailed_position_id":   player_data.get("detailed_position_id"),
         "minutes_played":         minutes,
         "nineties":               round(nineties, 2),
         "key_passes_total":       key_passes or 0,
@@ -191,6 +209,7 @@ def _calculate_baseline(player, season_id):
 
 
 def _upsert_baseline(baseline, league_id):
+    """Upsert a player baseline record into Supabase."""
     record = {**baseline, "league_id": league_id}
     existing = supabase.table("player_baselines")\
         .select("id")\
@@ -208,41 +227,83 @@ def _upsert_baseline(baseline, league_id):
         supabase.table("player_baselines").insert(record).execute()
 
 
+# ── PUBLIC FUNCTIONS ──────────────────────────────────────────────────────────
+
 def bootstrap_baselines(leagues=None):
-    """Seed all player baselines for all leagues. Run once per season."""
+    """
+    Seed all player baselines by pulling team rosters.
+    Much more controlled than global player search.
+    Roughly 20-30 players per team × 20 teams = ~400-600 players per league.
+    """
     target_leagues = leagues or LEAGUES
+
     print("\n" + "="*60)
-    print("  DEEP CURRENT — BASELINE BOOTSTRAP")
+    print("  DEEP CURRENT — BASELINE BOOTSTRAP (teams approach)")
     print("="*60)
+
     total_stored = 0
 
     for league in target_leagues:
         print(f"\n  {league['name']} (season {league['season_id']})")
-        players = _get_players_for_season(league["season_id"])
-        print(f"    {len(players)} players returned")
+
+        # Step 1 — get all teams in this season
+        team_ids = _get_teams_for_season(league["season_id"])
+        print(f"    Teams found: {len(team_ids)}")
+
+        if not team_ids:
+            print(f"    ⚠️  No teams found — check season_id")
+            continue
+
         stored = skipped = 0
 
-        for player in players:
-            baseline = _calculate_baseline(player, league["season_id"])
-            if baseline:
-                _upsert_baseline(baseline, league["league_id"])
-                stored += 1
-            else:
-                skipped += 1
+        # Step 2 — for each team get their squad
+        for team_id in team_ids:
+            squad = _get_squad_for_team(team_id, league["season_id"])
+
+            for player in squad:
+                player_id = player.get("id") or player.get("player_id")
+                if not player_id:
+                    continue
+
+                # Step 3 — get this player's season stats
+                player_data, details = _get_player_season_stats(
+                    player_id, league["season_id"]
+                )
+
+                if not details:
+                    skipped += 1
+                    continue
+
+                # Use squad entry for position if player_data missing it
+                if not player_data.get("position_id") and player.get("position_id"):
+                    player_data["position_id"] = player.get("position_id")
+                if not player_data.get("id"):
+                    player_data["id"] = player_id
+
+                baseline = _calculate_baseline(
+                    player_data, details, league["season_id"]
+                )
+
+                if baseline:
+                    _upsert_baseline(baseline, league["league_id"])
+                    stored += 1
+                else:
+                    skipped += 1
 
         print(f"    ✅ Stored: {stored} | Skipped: {skipped}")
         total_stored += stored
 
-    print(f"\n  TOTAL: {total_stored}")
+    print(f"\n  TOTAL BASELINES STORED: {total_stored}")
     print("="*60)
 
 
 def refresh_baselines(leagues=None):
-    """Weekly refresh. Cron: 0 3 * * 1"""
+    """Weekly refresh. Railway cron: 0 3 * * 1"""
     bootstrap_baselines(leagues)
 
 
 def get_player_baseline(player_id, season_id):
+    """Get a single player's baseline from Supabase."""
     res = supabase.table("player_baselines")\
         .select("*")\
         .eq("player_id", player_id)\
@@ -252,6 +313,7 @@ def get_player_baseline(player_id, season_id):
 
 
 def get_league_baselines(league_id, season_id):
+    """Get all baselines for a league/season."""
     res = supabase.table("player_baselines")\
         .select("*")\
         .eq("league_id", league_id)\
