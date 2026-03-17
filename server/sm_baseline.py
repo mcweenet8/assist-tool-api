@@ -96,14 +96,12 @@ def _get_teams_for_season(season_id):
     """Get all team IDs participating in a season."""
     try:
         resp = _sm_get(
-            endpoint=f"/seasons/{season_id}",
-            include="participants",
+            endpoint=f"/teams/seasons/{season_id}",
         )
-        data = resp.get("data", {})
-        participants = data.get("participants", [])
-        if isinstance(participants, dict):
-            participants = participants.get("data", [])
-        return [p.get("id") for p in participants if p.get("id")]
+        data = resp.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("data", [])
+        return [t.get("id") for t in data if t.get("id")]
     except Exception as e:
         print(f"    Error getting teams for season {season_id}: {e}")
         return []
