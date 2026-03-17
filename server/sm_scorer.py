@@ -11,8 +11,7 @@ import os
 import requests
 from datetime import datetime, date
 from supabase import create_client
-from sm_baseline import get_player_baseline, TYPE_IDS, _extract_stat, _sm_get
-
+from .sm_baseline import get_player_baseline, TYPE_IDS, _extract_stat, _sm_get
 SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN")
 SUPABASE_URL     = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY     = os.environ.get("SUPABASE_SERVICE_KEY")
