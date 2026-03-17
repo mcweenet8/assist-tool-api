@@ -535,16 +535,45 @@ def debug_fixtures(date):
     result = loop.run_until_complete(fetch())
     loop.close()
     return jsonify(result)
+# ── NEW ROUTES ────────────────────────────────────────────────────────────────
+from .positional_concessions import bootstrap_season, update_after_match, get_multipliers
+from .sm_baseline import bootstrap_baselines, refresh_baselines
+from .sm_scorer import score_todays_fixtures
+from .pipeline_comparison import build_comparison_for_date, record_outcomes, get_running_totals
 
+@app.route('/api/concessions/bootstrap', methods=['POST'])
+def concessions_bootstrap():
+    data = request.json
+    bootstrap_season(data['season_id'], data['league_id'])
+    return jsonify({"status": "ok"})
+
+@app.route('/api/baseline/bootstrap', methods=['POST'])
+def baseline_bootstrap():
+    bootstrap_baselines()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/sm/score-today', methods=['POST'])
+def sm_score_today():
+    score_todays_fixtures()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/comparison/build', methods=['POST'])
+def comparison_build():
+    build_comparison_for_date()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/comparison/outcomes', methods=['POST'])
+def comparison_outcomes():
+    record_outcomes()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/comparison/results', methods=['GET'])
+def comparison_results():
+    get_running_totals()
+    return jsonify({"status": "ok"})
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     log.info(f"Deep Current Football API v{APP_VERSION} starting on port {port}")
     app.run(host="0.0.0.0", port=port)
-
-
-
-
-
