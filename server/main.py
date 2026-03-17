@@ -549,8 +549,11 @@ def concessions_bootstrap():
 
 @app.route('/api/baseline/bootstrap', methods=['POST'])
 def baseline_bootstrap():
-    bootstrap_baselines()
-    return jsonify({"status": "ok"})
+    import threading
+    thread = threading.Thread(target=bootstrap_baselines)
+    thread.daemon = True
+    thread.start()
+    return jsonify({"status": "ok", "message": "Bootstrap started in background"})
 
 @app.route('/api/sm/score-today', methods=['POST'])
 def sm_score_today():
