@@ -328,15 +328,15 @@ def score_todays_fixtures(leagues=None):
     """
     today = date.today().isoformat()
     league_config = leagues or [
-        {"league_id": 8,    "season_id": 23614},
-        {"league_id": 5,    "season_id": 23599},
-        {"league_id": 564,  "season_id": 23686},
-        {"league_id": 384,  "season_id": 23615},
-        {"league_id": 82,   "season_id": 23538},
-        {"league_id": 301,  "season_id": 23611},
-        {"league_id": 1351, "season_id": 23700},
-        {"league_id": 174,  "season_id": 23645},
-    ]
+    {"league_id": 8,    "season_id": 25583},
+    {"league_id": 9,    "season_id": 25648},
+    {"league_id": 564,  "season_id": 25659},
+    {"league_id": 384,  "season_id": 25533},
+    {"league_id": 82,   "season_id": 25646},
+    {"league_id": 301,  "season_id": 25651},
+    {"league_id": 779,  "season_id": 26720},
+    {"league_id": 1356, "season_id": 26529},
+]
 
     print(f"\n{'='*60}")
     print(f"  SPORTMONKS MATCH DAY SCORING — {today}")
