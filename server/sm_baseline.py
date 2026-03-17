@@ -2,11 +2,11 @@
 Deep Current Football — Sportmonks Season Baseline Builder
 server/sm_baseline.py
 
-FINAL VERSION: Uses /statistics/seasons/players/{season_id}
-Pulls ALL player stats for a season in one paginated call.
-~10-20 API calls per league total.
+Uses /squads/seasons/{season_id}/teams/{team_id}?include=player.statistics.details
+Response structure per player:
+  entry -> player -> statistics[] -> filter by season_id -> details[]
 
-Also updates sm_scorer to use /expected/lineups endpoint for xG.
+~21 API calls per league (1 for teams + 20 for squads).
 """
 
 import os
@@ -32,6 +32,7 @@ LEAGUES = [
     {"league_id": 1356, "season_id": 26529, "name": "A-League Men"},
 ]
 
+# Confirmed type_ids from Lewis-Skelly validation
 TYPE_IDS = {
     "KEY_PASSES":                 117,
     "ACCURATE_CROSSES":           99,
@@ -49,27 +50,34 @@ TYPE_IDS = {
 }
 
 
+# ── CORE HTTP HELPER ──────────────────────────────────────────────────────────
+
 def _sm_get(endpoint, filters=None, include=None, extra_params=None, page=None):
-    """Core Sportmonks API GET helper using Authorization header."""
+    """Sportmonks API GET using Authorization header."""
     headers = {"Authorization": SPORTMONKS_TOKEN}
     params = {}
-    if filters:
-        params["filters"] = filters
-    if include:
-        params["include"] = include
-    if page:
-        params["page"] = page
-    if extra_params:
-        params.update(extra_params)
+    if filters:  params["filters"] = filters
+    if include:  params["include"] = include
+    if page:     params["page"] = page
+    if extra_params: params.update(extra_params)
 
-    url = f"{BASE_URL}{endpoint}"
-    response = requests.get(url, headers=headers, params=params, timeout=30)
+    response = requests.get(
+        f"{BASE_URL}{endpoint}",
+        headers=headers,
+        params=params,
+        timeout=30
+    )
     response.raise_for_status()
     return response.json()
 
 
+# ── STAT EXTRACTOR ────────────────────────────────────────────────────────────
+
 def _extract_stat(details, type_id):
-    """Extract a stat value from player details array by type_id."""
+    """
+    Extract a stat value from a details array by type_id.
+    details = list of {"type_id": X, "value": {"total": Y}} objects
+    """
     if not details:
         return None
     for d in details:
@@ -85,52 +93,86 @@ def _extract_stat(details, type_id):
     return None
 
 
+# ── TEAM FETCHER ──────────────────────────────────────────────────────────────
+
+def _get_teams_for_season(season_id):
+    """Get all team IDs for a season."""
+    try:
+        resp = _sm_get(endpoint=f"/teams/seasons/{season_id}")
+        data = resp.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("data", [])
+        return [t.get("id") for t in data if t.get("id")]
+    except Exception as e:
+        print(f"    Error getting teams: {e}")
+        return []
+
+
+# ── SQUAD FETCHER ─────────────────────────────────────────────────────────────
+
 def _get_squad_with_stats(team_id, season_id):
     """
-    Get squad for a team with player stats in one call.
-    Uses /squads/seasons/{season_id}/teams/{team_id}
-    with include=player.statistics.details (3 levels max)
+    Get full squad for a team with player stats in ONE API call.
+
+    Endpoint: /squads/seasons/{season_id}/teams/{team_id}
+    Include:  player.statistics.details  (3 levels — max allowed)
+
+    Response structure:
+    [
+      {
+        "player_id": 1453,
+        "team_id": 8,
+        "season_id": 25583,
+        "player": {
+          "id": 1453,
+          "name": "Joe Gomez",
+          "position_id": 25,
+          "statistics": [
+            {
+              "season_id": 25583,   <- filter for THIS season
+              "has_values": true,
+              "details": [
+                {"type_id": 117, "value": {"total": 5}},  <- KEY_PASSES
+                {"type_id": 119, "value": {"total": 496}}, <- MINUTES_PLAYED
+                ...
+              ]
+            },
+            ... (other seasons - ignore these)
+          ]
+        }
+      },
+      ...
+    ]
     """
     try:
         resp = _sm_get(
             endpoint=f"/squads/seasons/{season_id}/teams/{team_id}",
             include="player.statistics.details",
         )
-        return resp.get("data", [])
+        data = resp.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("data", [])
+        return data
     except Exception as e:
         print(f"    Error getting squad for team {team_id}: {e}")
         return []
-def _calculate_baseline_from_stat(stat_record, season_id):
+
+
+# ── BASELINE CALCULATOR ───────────────────────────────────────────────────────
+
+def _calculate_baseline(player, details, season_id):
     """
-    Calculate per-90 baselines from a season stat record.
-    stat_record is a PlayerStatistic object from the season stats endpoint.
+    Calculate per-90 baselines from a player object and their season details.
+
+    Args:
+        player:    the player dict (has id, name, position_id etc)
+        details:   the details array for the specific season we want
+        season_id: the season we're calculating for
+
+    Returns:
+        baseline dict or None if insufficient data
     """
-    # Get player info from nested player object
-    player = stat_record.get("player", {})
-    if isinstance(player, dict) and "data" in player:
-        player = player["data"]
-
-    player_id   = stat_record.get("player_id") or (player.get("id") if player else None)
-    player_name = None
-    position_id = None
-    detailed_position_id = None
-
-    if player:
-        player_name          = player.get("display_name") or player.get("name")
-        position_id          = player.get("position_id")
-        detailed_position_id = player.get("detailed_position_id")
-
-    if not player_id:
-        return None
-
-    # Get details
-    details = stat_record.get("details", [])
-    if isinstance(details, dict):
-        details = details.get("data", [])
-
-    if not details:
-        return None
-
+    # Extract raw stat values using type_ids
     minutes      = _extract_stat(details, TYPE_IDS["MINUTES_PLAYED"])
     key_passes   = _extract_stat(details, TYPE_IDS["KEY_PASSES"])
     acc_crosses  = _extract_stat(details, TYPE_IDS["ACCURATE_CROSSES"])
@@ -141,6 +183,7 @@ def _calculate_baseline_from_stat(stat_record, season_id):
     goals        = _extract_stat(details, TYPE_IDS["GOALS"])
     dribbles     = _extract_stat(details, TYPE_IDS["SUCCESSFUL_DRIBBLES"])
 
+    # Must have played at least 90 minutes
     if not minutes or minutes < 90:
         return None
 
@@ -149,6 +192,7 @@ def _calculate_baseline_from_stat(stat_record, season_id):
     def per90(val):
         return round(val / nineties, 3) if val else 0.0
 
+    # Pass accuracy — use percentage field if available, else calculate
     if pass_acc_pct is not None:
         pass_accuracy = round(
             pass_acc_pct / 100 if pass_acc_pct > 1 else pass_acc_pct, 4
@@ -159,11 +203,11 @@ def _calculate_baseline_from_stat(stat_record, season_id):
         pass_accuracy = None
 
     return {
-        "player_id":              player_id,
-        "player_name":            player_name,
+        "player_id":              player.get("id"),
+        "player_name":            player.get("display_name") or player.get("name"),
         "season_id":              season_id,
-        "position_id":            position_id,
-        "detailed_position_id":   detailed_position_id,
+        "position_id":            player.get("position_id"),
+        "detailed_position_id":   player.get("detailed_position_id"),
         "minutes_played":         minutes,
         "nineties":               round(nineties, 2),
         "key_passes_total":       key_passes or 0,
@@ -182,9 +226,12 @@ def _calculate_baseline_from_stat(stat_record, season_id):
     }
 
 
+# ── SUPABASE UPSERT ───────────────────────────────────────────────────────────
+
 def _upsert_baseline(baseline, league_id):
-    """Upsert a player baseline record into Supabase."""
+    """Insert or update a player baseline in Supabase."""
     record = {**baseline, "league_id": league_id}
+
     existing = supabase.table("player_baselines")\
         .select("id")\
         .eq("player_id", baseline["player_id"])\
@@ -201,15 +248,26 @@ def _upsert_baseline(baseline, league_id):
         supabase.table("player_baselines").insert(record).execute()
 
 
+# ── PUBLIC FUNCTIONS ──────────────────────────────────────────────────────────
+
 def bootstrap_baselines(leagues=None):
     """
-    Seed all player baselines using season statistics endpoint.
-    Most efficient approach — ~10-20 API calls per league.
+    Seed all player baselines for all covered leagues.
+
+    Flow per league:
+      1. Get all team IDs           (~1 API call)
+      2. For each team get squad
+         with player stats nested   (~1 API call per team)
+      3. Filter stats for current
+         season, calculate per-90s
+      4. Store in player_baselines
+
+    Total: ~21 API calls per league, ~170 for all 8 leagues.
     """
     target_leagues = leagues or LEAGUES
 
     print("\n" + "="*60)
-    print("  DEEP CURRENT — BASELINE BOOTSTRAP (season stats)")
+    print("  DEEP CURRENT — BASELINE BOOTSTRAP")
     print("="*60)
 
     total_stored = 0
@@ -217,21 +275,70 @@ def bootstrap_baselines(leagues=None):
     for league in target_leagues:
         print(f"\n  {league['name']} (season {league['season_id']})")
 
-        # Pull all player stats for this season in one paginated call
-        stat_records = _get_all_season_player_stats(league["season_id"])
-        print(f"    Total stat records: {len(stat_records)}")
+        # Step 1 — get team IDs
+        team_ids = _get_teams_for_season(league["season_id"])
+        print(f"    Teams found: {len(team_ids)}")
+
+        if not team_ids:
+            print(f"    ⚠️  No teams — check season_id")
+            continue
 
         stored = skipped = 0
 
-        for record in stat_records:
-            baseline = _calculate_baseline_from_stat(record, league["season_id"])
-            if baseline:
-                _upsert_baseline(baseline, league["league_id"])
-                stored += 1
-            else:
-                skipped += 1
+        # Step 2 — get squad + stats for each team
+        for i, team_id in enumerate(team_ids):
+            squad = _get_squad_with_stats(team_id, league["season_id"])
 
-        print(f"    ✅ Stored: {stored} | Skipped (< 90 min): {skipped}")
+            for entry in squad:
+                # Get the nested player object
+                player = entry.get("player", {})
+                if isinstance(player, dict) and "data" in player:
+                    player = player["data"]
+
+                if not player or not player.get("id"):
+                    skipped += 1
+                    continue
+
+                # Find this season's stats from the player's history
+                statistics = player.get("statistics", [])
+                if isinstance(statistics, dict):
+                    statistics = statistics.get("data", [])
+
+                # Filter for current season with data
+                season_stat = next(
+                    (s for s in statistics
+                     if s.get("season_id") == league["season_id"]
+                     and s.get("has_values")),
+                    None
+                )
+
+                if not season_stat:
+                    skipped += 1
+                    continue
+
+                # Get the details array for this season
+                details = season_stat.get("details", [])
+                if isinstance(details, dict):
+                    details = details.get("data", [])
+
+                if not details:
+                    skipped += 1
+                    continue
+
+                # Calculate and store baseline
+                baseline = _calculate_baseline(
+                    player, details, league["season_id"]
+                )
+
+                if baseline:
+                    _upsert_baseline(baseline, league["league_id"])
+                    stored += 1
+                else:
+                    skipped += 1
+
+            print(f"    Team {i+1}/{len(team_ids)} (id:{team_id}) done")
+
+        print(f"    ✅ Stored: {stored} | Skipped: {skipped}")
         total_stored += stored
 
     print(f"\n  TOTAL BASELINES STORED: {total_stored}")
