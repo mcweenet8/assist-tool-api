@@ -1786,3 +1786,25 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     log.info(f"Starting server on port {port}")
     app.run(host="0.0.0.0", port=port)
+from positional_concessions import bootstrap_season, update_after_match, get_multipliers
+from sm_baseline import bootstrap_baselines, refresh_baselines
+from sm_scorer import score_todays_fixtures
+from pipeline_comparison import build_comparison_for_date, record_outcomes, get_running_totals
+
+@app.route('/api/concessions/bootstrap', methods=['POST'])
+def concessions_bootstrap():
+    data = request.json
+    bootstrap_season(data['season_id'], data['league_id'])
+    return jsonify({"status": "ok"})
+
+@app.route('/api/baseline/bootstrap', methods=['POST'])
+def baseline_bootstrap():
+    bootstrap_baselines()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/sm/score-today', methods=['POST'])
+def sm_score_today():
+    score_todays_fixtures()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/comparison/build', methods=['PO
