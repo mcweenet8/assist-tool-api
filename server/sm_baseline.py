@@ -85,45 +85,21 @@ def _extract_stat(details, type_id):
     return None
 
 
-def _get_all_season_player_stats(season_id):
+def _get_squad_with_stats(team_id, season_id):
     """
-    Pull ALL player season statistics in paginated calls.
-    Uses /statistics/seasons/players/{season_id} endpoint.
-    Returns list of player stat records with details.
-    ~10-20 API calls total vs ~500 before.
+    Get squad for a team with player stats in one call.
+    Uses /squads/seasons/{season_id}/teams/{team_id}
+    with include=player.statistics.details (3 levels max)
     """
-    all_stats = []
-    page = 1
-
-    while True:
-        try:
-            resp = _sm_get(
-                endpoint=f"/statistics/seasons/players/{season_id}",
-                include="player;details.type",
-                extra_params={"per_page": 50},
-                page=page,
-            )
-        except Exception as e:
-            print(f"    Error on page {page}: {e}")
-            break
-
-        data = resp.get("data", [])
-        if not data:
-            break
-
-        all_stats.extend(data)
-
-        pagination = resp.get("pagination", {})
-        if not pagination.get("has_more", False):
-            break
-
-        page += 1
-        if page % 5 == 0:
-            print(f"    Page {page - 1} — {len(all_stats)} records so far...")
-
-    return all_stats
-
-
+    try:
+        resp = _sm_get(
+            endpoint=f"/squads/seasons/{season_id}/teams/{team_id}",
+            include="player.statistics.details",
+        )
+        return resp.get("data", [])
+    except Exception as e:
+        print(f"    Error getting squad for team {team_id}: {e}")
+        return []
 def _calculate_baseline_from_stat(stat_record, season_id):
     """
     Calculate per-90 baselines from a season stat record.
