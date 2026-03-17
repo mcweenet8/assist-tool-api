@@ -1778,14 +1778,7 @@ def player_detail(player_id):
     except Exception as e:
         log.error(f"player_detail {player_id}: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    log.info(f"Starting server on port {port}")
-    app.run(host="0.0.0.0", port=port)
+# ── NEW IMPORTS & ROUTES ─────────────────────────────────────────────────────
 from positional_concessions import bootstrap_season, update_after_match, get_multipliers
 from sm_baseline import bootstrap_baselines, refresh_baselines
 from sm_scorer import score_todays_fixtures
@@ -1807,4 +1800,23 @@ def sm_score_today():
     score_todays_fixtures()
     return jsonify({"status": "ok"})
 
-@app.route('/api/comparison/build', methods=['PO
+@app.route('/api/comparison/build', methods=['POST'])
+def comparison_build():
+    build_comparison_for_date()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/comparison/outcomes', methods=['POST'])
+def comparison_outcomes():
+    record_outcomes()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/comparison/results', methods=['GET'])
+def comparison_results():
+    get_running_totals()
+    return jsonify({"status": "ok"})
+
+# ── Entry point ───────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    log.info(f"Starting server on port {port}")
+    app.run(host="0.0.0.0", port=port)
