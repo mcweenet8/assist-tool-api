@@ -36,6 +36,9 @@ GOAL_WEIGHTS = {
     "goals_p90": 0.20,
 }
 
+# Score scaling factor — aligns SM distribution with FotMob range
+SCORE_SCALE = 2.0
+
 # League name lookup
 LEAGUE_NAMES = {
     8:    "Premier League",
@@ -262,8 +265,10 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
             "player_id":         player_id,
             "player_name":       entry.get("player_name"),
             "team_id":           entry.get("team_id"),
+            "team_name":         baseline.get("team_name"),
             "season_id":         season_id,
             "league_id":         league_id,
+            "league_name":       LEAGUE_NAMES.get(league_id, ""),
             "game_date":         game_date,
             "source":            "sportmonks",
             "minutes_played":    90,
@@ -395,19 +400,8 @@ def get_latest_scores():
 def get_season_scores():
     """
     Calculate season-long DC scores for all players from player_baselines.
-
-    This is the SM equivalent of FotMob's 'All Players' view.
-    Uses per-90 season stats as the inputs, scores against league averages.
-
-    Since every player IS their own baseline, we score them relative to
-    their peers by calculating ratios against league averages instead of
-    individual baselines. This gives a meaningful ranking across all players.
-
-    Flow:
-      1. Pull all baselines from player_baselines
-      2. Calculate league averages per league_id
-      3. Score each player relative to their league average
-      4. Return ranked by tsoa descending
+    Scores against league averages, scaled ×2.0 to match FotMob distribution.
+    Minimum 270 minutes (3 full games) to appear in rankings.
     """
     try:
         res = supabase.table("player_baselines")\
@@ -418,7 +412,7 @@ def get_season_scores():
         if not rows:
             return {"players": [], "count": 0, "source": "sportmonks_season", "error": "No baselines found"}
 
-        # ── Step 1: Calculate league averages ────────────────────────────────
+        # ── Step 1: Calculate league averages ─────────────────────────────────
         from collections import defaultdict
 
         league_stats = defaultdict(lambda: {
@@ -429,10 +423,10 @@ def get_season_scores():
         for row in rows:
             lid = row.get("league_id")
             if not lid: continue
-            if row.get("kp_per90"):         league_stats[lid]["kp_per90"].append(row["kp_per90"])
-            if row.get("acc_cross_per90"):   league_stats[lid]["acc_cross_per90"].append(row["acc_cross_per90"])
-            if row.get("sot_per90"):         league_stats[lid]["sot_per90"].append(row["sot_per90"])
-            if row.get("goals_per90"):       league_stats[lid]["goals_per90"].append(row["goals_per90"])
+            if row.get("kp_per90"):              league_stats[lid]["kp_per90"].append(row["kp_per90"])
+            if row.get("acc_cross_per90"):        league_stats[lid]["acc_cross_per90"].append(row["acc_cross_per90"])
+            if row.get("sot_per90"):              league_stats[lid]["sot_per90"].append(row["sot_per90"])
+            if row.get("goals_per90"):            league_stats[lid]["goals_per90"].append(row["goals_per90"])
             if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
 
         def avg(lst): return sum(lst) / len(lst) if lst else 0.001
@@ -447,48 +441,48 @@ def get_season_scores():
                 "pass_acc":    avg(stats["pass_acc"]),
             }
 
-        # ── Step 2: Score each player ─────────────────────────────────────────
+        # ── Step 2: Score each player ──────────────────────────────────────────
         players = []
 
         for row in rows:
-            lid      = row.get("league_id")
-            minutes  = row.get("minutes_played", 0)
+            lid     = row.get("league_id")
+            minutes = row.get("minutes_played", 0)
 
-            # Minimum 450 minutes (5 full games) to appear in season ranking
-            if not minutes or minutes < 450:
+            # Minimum 270 minutes (3 full games)
+            if not minutes or minutes < 270:
                 continue
 
             avgs = league_avgs.get(lid, {})
             if not avgs:
                 continue
 
-            kp_per90   = row.get("kp_per90")   or 0
-            cross_per90 = row.get("acc_cross_per90") or 0
-            sot_per90  = row.get("sot_per90")  or 0
-            goals_per90 = row.get("goals_per90") or 0
-            pass_acc   = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
+            kp_per90    = row.get("kp_per90")            or 0
+            cross_per90 = row.get("acc_cross_per90")     or 0
+            sot_per90   = row.get("sot_per90")           or 0
+            goals_per90 = row.get("goals_per90")         or 0
+            pass_acc    = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
 
             # Ratios vs league average
-            kp_ratio    = kp_per90   / avgs.get("kp_per90",    0.001)
+            kp_ratio    = kp_per90    / avgs.get("kp_per90",    0.001)
             cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
-            pa_ratio    = pass_acc   / avgs.get("pass_acc",     0.001)
-            sot_ratio   = sot_per90  / avgs.get("sot_per90",   0.001)
+            pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
+            sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
 
-            # DC Assist Index
-            assist_index = round(
+            # DC Assist Index (raw then scaled)
+            assist_index_raw = (
                 kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
                 cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
-                pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"],
-                4
+                pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"]
             )
+            assist_index = round(assist_index_raw * SCORE_SCALE, 4)
 
-            # DC Goal Score — no xG/xGOT at season level so use SOT + goals
-            goal_score = round(
+            # DC Goal Score (raw then scaled)
+            goal_score_raw = (
                 sot_per90   * GOAL_WEIGHTS["sot_per90"] +
                 goals_per90 * GOAL_WEIGHTS["goals_p90"] +
-                sot_ratio   * GOAL_WEIGHTS["xgot_gap"],   # SOT ratio as xGOT proxy
-                4
+                sot_ratio   * GOAL_WEIGHTS["xgot_gap"]
             )
+            goal_score = round(goal_score_raw * SCORE_SCALE, 4)
 
             # TSOA
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
@@ -497,7 +491,7 @@ def get_season_scores():
                 "player_id":        row.get("player_id"),
                 "player_name":      row.get("player_name"),
                 "team_id":          row.get("team_id"),
-                "team_name":        row.get("team_name"),
+                "team_name":        row.get("team_name"),   # ← now populated
                 "league_id":        lid,
                 "league_name":      LEAGUE_NAMES.get(lid, ""),
                 "minutes_played":   minutes,
@@ -516,7 +510,7 @@ def get_season_scores():
                 "kp_ratio":         round(kp_ratio, 3),
                 "cross_ratio":      round(cross_ratio, 3),
                 "pass_acc_ratio":   round(pa_ratio, 3),
-                # Scores
+                # Scores (scaled)
                 "assist_index":     assist_index,
                 "goal_score":       goal_score,
                 "tsoa_score":       tsoa,
