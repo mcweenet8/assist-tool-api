@@ -59,10 +59,7 @@ def get_todays_fixtures(league_id, today=None):
 
 
 def pull_fixture_lineups(fixture_id):
-    """
-    Pull lineup for a fixture.
-    Uses fixture include for lineup data.
-    """
+    """Pull lineup for a fixture."""
     resp = _sm_get(
         endpoint=f"/fixtures/{fixture_id}",
         include="lineups",
@@ -77,7 +74,6 @@ def pull_fixture_lineups(fixture_id):
 def pull_fixture_xg(fixture_id):
     """
     Pull per-player xG and xGOT using /expected/lineups endpoint.
-    Filters by fixtureId for this specific match.
     Returns {player_id: {"xg": float, "xgot": float}}
     """
     try:
@@ -125,8 +121,8 @@ def calculate_assist_index(game_kp, game_crosses, game_pass_acc, minutes, baseli
     kp_per90    = game_kp / nineties
     cross_per90 = game_crosses / nineties
 
-    b_kp    = baseline.get("kp_per90")             or 0.001
-    b_cross = baseline.get("acc_cross_per90")      or 0.001
+    b_kp    = baseline.get("kp_per90")              or 0.001
+    b_cross = baseline.get("acc_cross_per90")       or 0.001
     b_pa    = baseline.get("pass_accuracy_baseline") or 0.001
 
     kp_ratio    = kp_per90 / b_kp
@@ -223,15 +219,12 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
         if not baseline:
             continue
 
-        # Use baseline season stats as proxy for this game
-        # (per-game stat granularity is a Gate 4 enhancement)
         minutes   = baseline.get("minutes_played", 90)
         kp        = baseline.get("key_passes_total", 0)
         acc_cross = baseline.get("acc_crosses_total", 0)
         sot       = baseline.get("sot_total", 0)
         pass_acc  = baseline.get("pass_accuracy_baseline")
 
-        # Normalize to per-game averages using nineties
         nineties = baseline.get("nineties", 1)
         games    = max(nineties, 1)
 
@@ -324,3 +317,86 @@ def score_todays_fixtures(leagues=None):
 
     print(f"\n  TOTAL SCORED TODAY: {total}")
     print("="*60)
+
+
+# ── APP DATA FETCHER ──────────────────────────────────────────────────────────
+
+def get_latest_scores():
+    """
+    Fetch latest Sportmonks player scores from Supabase.
+    Called by GET /api/sm/data — returns scores sorted by tsoa descending.
+    Maps column names to what SMScreen.js expects.
+    """
+    try:
+        res = supabase.table("sm_player_scores")\
+            .select("*")\
+            .order("tsoa", desc=True)\
+            .limit(500)\
+            .execute()
+
+        players = []
+        for row in (res.data or []):
+            players.append({
+                "player_id":             row.get("player_id"),
+                "player_name":           row.get("player_name"),
+                "team_id":               row.get("team_id"),
+                "team_name":             row.get("team_name"),
+                "league_id":             row.get("league_id"),
+                "league_name":           row.get("league_name"),
+                "fixture_id":            row.get("fixture_id"),
+                "fixture_label":         row.get("fixture_label"),
+                "game_date":             row.get("game_date"),
+                "minutes_played":        row.get("minutes_played"),
+                # Assist index inputs
+                "kp_per90":              row.get("key_passes"),
+                "acc_cross_per90":       row.get("acc_crosses"),
+                "pass_accuracy":         row.get("pass_accuracy"),
+                # Goal score inputs
+                "sot_per90":             row.get("sot"),
+                "xg_per90":              row.get("xg_game"),
+                "xgot_gap":              _safe_xgot_gap(row),
+                # Scores
+                "assist_index":          row.get("assist_index"),
+                "goal_score":            row.get("goal_score"),
+                "tsoa_score":            row.get("tsoa"),
+                "dual_threat":           row.get("dual_threat"),
+                # Baseline refs for modal breakdown
+                "baseline_kp_per90":     row.get("baseline_kp_per90"),
+                "baseline_cross_per90":  row.get("baseline_cross_per90"),
+                "baseline_pass_acc":     row.get("baseline_pass_acc"),
+                "baseline_sot_per90":    row.get("baseline_sot_per90"),
+                "kp_ratio":              row.get("kp_ratio"),
+                "cross_ratio":           row.get("cross_ratio"),
+                "pass_acc_ratio":        row.get("pass_acc_ratio"),
+                "goals_per90":           row.get("goals_per90"),
+                # Concession flag
+                "concession_flag":       row.get("concession_flag"),
+                "concession_multiplier": row.get("concession_multiplier"),
+                # Grade colors
+                "assist_grade":          row.get("assist_grade"),
+                "goal_grade":            row.get("goal_grade"),
+                "tsoa_grade":            row.get("tsoa_grade"),
+                "scored_at":             row.get("scored_at"),
+            })
+
+        last_updated = players[0]["scored_at"] if players else None
+
+        return {
+            "players":      players,
+            "count":        len(players),
+            "source":       "sportmonks",
+            "last_updated": last_updated,
+        }
+
+    except Exception as e:
+        print(f"get_latest_scores error: {e}")
+        return {"players": [], "count": 0, "source": "sportmonks", "error": str(e)}
+
+
+def _safe_xgot_gap(row):
+    """Calculate xGOT gap from stored xg and xgot values."""
+    xg   = row.get("xg_game")
+    xgot = row.get("xgot_game")
+    if xg is not None and xgot is not None:
+        return round(xgot - xg, 4)
+    return None
