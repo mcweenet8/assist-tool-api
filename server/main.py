@@ -1,20 +1,6 @@
 # =============================================================================
 # main.py — Deep Current Football API v3
 # =============================================================================
-# Endpoints:
-#   GET  /            — health check + version
-#   GET  /status      — health check (alias)
-#   GET  /version     — version info
-#   GET  /data        — cached player + team data
-#   POST /refresh     — re-run full scraper
-#   GET  /fixtures    — upcoming + live fixtures
-#   GET  /standings   — team standings by league
-#   GET  /match/<id>  — squad intelligence for a fixture
-#   GET  /lineups/<id>— confirmed lineups via API-Football
-#   GET  /live/<id>   — live match events + stats
-#   GET  /player/<id> — L5 goals + assists for a player
-#   GET  /api/sm/data — Sportmonks player scores
-# =============================================================================
 
 import asyncio, os, logging
 from datetime import datetime
@@ -573,6 +559,11 @@ def sm_data():
     return jsonify(get_latest_scores())
 
 
+@app.route('/api/sm/season', methods=['GET'])
+def sm_season():
+    return jsonify(get_season_scores())
+
+
 @app.route('/api/comparison/build', methods=['POST'])
 def comparison_build():
     build_comparison_for_date()
@@ -587,8 +578,7 @@ def comparison_outcomes():
 
 @app.route('/api/comparison/results', methods=['GET'])
 def comparison_results():
-    get_running_totals()
-    return jsonify({"status": "ok"})
+    return jsonify(get_running_totals())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
