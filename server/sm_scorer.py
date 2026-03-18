@@ -36,6 +36,18 @@ GOAL_WEIGHTS = {
     "goals_p90": 0.20,
 }
 
+# League name lookup
+LEAGUE_NAMES = {
+    8:    "Premier League",
+    9:    "Championship",
+    564:  "La Liga",
+    384:  "Serie A",
+    82:   "Bundesliga",
+    301:  "Ligue 1",
+    779:  "MLS",
+    1356: "A-League Men",
+}
+
 
 def grade_color(score):
     if score >= 3.0: return "#00BFFF"
@@ -319,13 +331,12 @@ def score_todays_fixtures(leagues=None):
     print("="*60)
 
 
-# ── APP DATA FETCHER ──────────────────────────────────────────────────────────
+# ── APP DATA FETCHERS ─────────────────────────────────────────────────────────
 
 def get_latest_scores():
     """
-    Fetch latest Sportmonks player scores from Supabase.
-    Called by GET /api/sm/data — returns scores sorted by tsoa descending.
-    Maps column names to what SMScreen.js expects.
+    Fetch latest match day Sportmonks scores from Supabase.
+    Called by GET /api/sm/data
     """
     try:
         res = supabase.table("sm_player_scores")\
@@ -347,20 +358,16 @@ def get_latest_scores():
                 "fixture_label":         row.get("fixture_label"),
                 "game_date":             row.get("game_date"),
                 "minutes_played":        row.get("minutes_played"),
-                # Assist index inputs
                 "kp_per90":              row.get("key_passes"),
                 "acc_cross_per90":       row.get("acc_crosses"),
                 "pass_accuracy":         row.get("pass_accuracy"),
-                # Goal score inputs
                 "sot_per90":             row.get("sot"),
                 "xg_per90":              row.get("xg_game"),
                 "xgot_gap":              _safe_xgot_gap(row),
-                # Scores
                 "assist_index":          row.get("assist_index"),
                 "goal_score":            row.get("goal_score"),
                 "tsoa_score":            row.get("tsoa"),
                 "dual_threat":           row.get("dual_threat"),
-                # Baseline refs for modal breakdown
                 "baseline_kp_per90":     row.get("baseline_kp_per90"),
                 "baseline_cross_per90":  row.get("baseline_cross_per90"),
                 "baseline_pass_acc":     row.get("baseline_pass_acc"),
@@ -369,10 +376,8 @@ def get_latest_scores():
                 "cross_ratio":           row.get("cross_ratio"),
                 "pass_acc_ratio":        row.get("pass_acc_ratio"),
                 "goals_per90":           row.get("goals_per90"),
-                # Concession flag
                 "concession_flag":       row.get("concession_flag"),
                 "concession_multiplier": row.get("concession_multiplier"),
-                # Grade colors
                 "assist_grade":          row.get("assist_grade"),
                 "goal_grade":            row.get("goal_grade"),
                 "tsoa_grade":            row.get("tsoa_grade"),
@@ -380,17 +385,165 @@ def get_latest_scores():
             })
 
         last_updated = players[0]["scored_at"] if players else None
-
-        return {
-            "players":      players,
-            "count":        len(players),
-            "source":       "sportmonks",
-            "last_updated": last_updated,
-        }
+        return {"players": players, "count": len(players), "source": "sportmonks", "last_updated": last_updated}
 
     except Exception as e:
         print(f"get_latest_scores error: {e}")
         return {"players": [], "count": 0, "source": "sportmonks", "error": str(e)}
+
+
+def get_season_scores():
+    """
+    Calculate season-long DC scores for all players from player_baselines.
+
+    This is the SM equivalent of FotMob's 'All Players' view.
+    Uses per-90 season stats as the inputs, scores against league averages.
+
+    Since every player IS their own baseline, we score them relative to
+    their peers by calculating ratios against league averages instead of
+    individual baselines. This gives a meaningful ranking across all players.
+
+    Flow:
+      1. Pull all baselines from player_baselines
+      2. Calculate league averages per league_id
+      3. Score each player relative to their league average
+      4. Return ranked by tsoa descending
+    """
+    try:
+        res = supabase.table("player_baselines")\
+            .select("*")\
+            .execute()
+
+        rows = res.data or []
+        if not rows:
+            return {"players": [], "count": 0, "source": "sportmonks_season", "error": "No baselines found"}
+
+        # ── Step 1: Calculate league averages ────────────────────────────────
+        from collections import defaultdict
+
+        league_stats = defaultdict(lambda: {
+            "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
+            "goals_per90": [], "pass_acc": []
+        })
+
+        for row in rows:
+            lid = row.get("league_id")
+            if not lid: continue
+            if row.get("kp_per90"):         league_stats[lid]["kp_per90"].append(row["kp_per90"])
+            if row.get("acc_cross_per90"):   league_stats[lid]["acc_cross_per90"].append(row["acc_cross_per90"])
+            if row.get("sot_per90"):         league_stats[lid]["sot_per90"].append(row["sot_per90"])
+            if row.get("goals_per90"):       league_stats[lid]["goals_per90"].append(row["goals_per90"])
+            if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
+
+        def avg(lst): return sum(lst) / len(lst) if lst else 0.001
+
+        league_avgs = {}
+        for lid, stats in league_stats.items():
+            league_avgs[lid] = {
+                "kp_per90":    avg(stats["kp_per90"]),
+                "cross_per90": avg(stats["acc_cross_per90"]),
+                "sot_per90":   avg(stats["sot_per90"]),
+                "goals_per90": avg(stats["goals_per90"]),
+                "pass_acc":    avg(stats["pass_acc"]),
+            }
+
+        # ── Step 2: Score each player ─────────────────────────────────────────
+        players = []
+
+        for row in rows:
+            lid      = row.get("league_id")
+            minutes  = row.get("minutes_played", 0)
+
+            # Minimum 450 minutes (5 full games) to appear in season ranking
+            if not minutes or minutes < 450:
+                continue
+
+            avgs = league_avgs.get(lid, {})
+            if not avgs:
+                continue
+
+            kp_per90   = row.get("kp_per90")   or 0
+            cross_per90 = row.get("acc_cross_per90") or 0
+            sot_per90  = row.get("sot_per90")  or 0
+            goals_per90 = row.get("goals_per90") or 0
+            pass_acc   = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
+
+            # Ratios vs league average
+            kp_ratio    = kp_per90   / avgs.get("kp_per90",    0.001)
+            cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
+            pa_ratio    = pass_acc   / avgs.get("pass_acc",     0.001)
+            sot_ratio   = sot_per90  / avgs.get("sot_per90",   0.001)
+
+            # DC Assist Index
+            assist_index = round(
+                kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
+                cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
+                pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"],
+                4
+            )
+
+            # DC Goal Score — no xG/xGOT at season level so use SOT + goals
+            goal_score = round(
+                sot_per90   * GOAL_WEIGHTS["sot_per90"] +
+                goals_per90 * GOAL_WEIGHTS["goals_p90"] +
+                sot_ratio   * GOAL_WEIGHTS["xgot_gap"],   # SOT ratio as xGOT proxy
+                4
+            )
+
+            # TSOA
+            tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
+
+            players.append({
+                "player_id":        row.get("player_id"),
+                "player_name":      row.get("player_name"),
+                "team_id":          row.get("team_id"),
+                "team_name":        row.get("team_name"),
+                "league_id":        lid,
+                "league_name":      LEAGUE_NAMES.get(lid, ""),
+                "minutes_played":   minutes,
+                "nineties":         row.get("nineties"),
+                # Per-90 stats
+                "kp_per90":         kp_per90,
+                "acc_cross_per90":  cross_per90,
+                "sot_per90":        sot_per90,
+                "goals_per90":      goals_per90,
+                "pass_accuracy":    pass_acc,
+                # League avg context
+                "league_avg_kp":    round(avgs.get("kp_per90", 0), 3),
+                "league_avg_cross": round(avgs.get("cross_per90", 0), 3),
+                "league_avg_sot":   round(avgs.get("sot_per90", 0), 3),
+                # Ratios
+                "kp_ratio":         round(kp_ratio, 3),
+                "cross_ratio":      round(cross_ratio, 3),
+                "pass_acc_ratio":   round(pa_ratio, 3),
+                # Scores
+                "assist_index":     assist_index,
+                "goal_score":       goal_score,
+                "tsoa_score":       tsoa,
+                # Grades
+                "assist_grade":     grade_color(assist_index or 0),
+                "goal_grade":       grade_color(goal_score or 0),
+                "tsoa_grade":       grade_color(tsoa or 0),
+                # Baseline refs for modal
+                "baseline_kp_per90":    kp_per90,
+                "baseline_cross_per90": cross_per90,
+                "baseline_sot_per90":   sot_per90,
+                "data_source":          "season_baseline",
+            })
+
+        # Sort by tsoa descending
+        players.sort(key=lambda p: p.get("tsoa_score") or 0, reverse=True)
+
+        return {
+            "players":      players,
+            "count":        len(players),
+            "source":       "sportmonks_season",
+            "last_updated": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        print(f"get_season_scores error: {e}")
+        return {"players": [], "count": 0, "source": "sportmonks_season", "error": str(e)}
 
 
 def _safe_xgot_gap(row):
