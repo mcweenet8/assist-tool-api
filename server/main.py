@@ -542,7 +542,7 @@ def debug_fixtures(date):
 
 from .positional_concessions import bootstrap_season, update_after_match, get_multipliers
 from .sm_baseline import bootstrap_baselines, refresh_baselines
-from .sm_scorer import score_todays_fixtures, get_latest_scores
+from .sm_scorer import score_todays_fixtures, get_latest_scores, get_season_scores
 from .pipeline_comparison import build_comparison_for_date, record_outcomes, get_running_totals
 
 
