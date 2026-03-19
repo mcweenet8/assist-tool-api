@@ -552,7 +552,16 @@ def baseline_bootstrap():
 def sm_score_today():
     score_todays_fixtures()
     return jsonify({"status": "ok"})
-
+@app.route('/api/sm/refresh-today', methods=['POST'])
+def sm_refresh_today():
+    import threading
+    def run():
+        score_todays_fixtures()
+        build_comparison_for_date()
+    thread = threading.Thread(target=run)
+    thread.daemon = True
+    thread.start()
+    return jsonify({"status": "ok", "message": "SM refresh started in background"})
 
 @app.route('/api/sm/data', methods=['GET'])
 def sm_data():
