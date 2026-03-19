@@ -38,8 +38,8 @@ GOAL_WEIGHTS = {
 
 # Score scaling — per market to match FotMob distribution
 # Targets: Assist ~56 players >3.0, Goals ~38, TSOA ~84
-ASSIST_SCALE = 0.85
-GOAL_SCALE   = 3.5
+ASSIST_SCALE = 1.4
+GOAL_SCALE   = 1.8
 
 # League name lookup
 LEAGUE_NAMES = {
