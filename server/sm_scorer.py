@@ -1,11 +1,6 @@
 """
 Deep Current Football — Sportmonks Match Day Scorer
 server/sm_scorer.py
-
-Uses correct endpoints:
-  - /squads/seasons/{season_id}/teams/{team_id} for lineups
-  - /expected/lineups?filters=fixtureId:{id} for xG per player
-  - /fixtures/between/{date}/{date} for today's fixtures
 """
 
 import os
@@ -37,12 +32,9 @@ GOAL_WEIGHTS = {
     "goals_p90": 0.20,
 }
 
-# Score scaling — per market to match FotMob distribution
-# Targets: Assist ~56 players >3.0, Goals ~38, TSOA ~84
 ASSIST_SCALE = 1.5
 GOAL_SCALE   = 2.45
 
-# League name lookup
 LEAGUE_NAMES = {
     8:    "Premier League",
     9:    "Championship",
@@ -62,10 +54,28 @@ def grade_color(score):
     return "#FF6B6B"
 
 
+def _conversion_modifier(assists_total, key_passes_total, league_avg_conversion):
+    """
+    Dampen or boost assist index based on actual conversion rate.
+    conversion_rate = assists / key_passes
+    modifier = clamp(conversion_rate / league_avg, 0.70, 1.30)
+    Players who convert well get a small boost.
+    Players who create a lot but rarely assist get dampened.
+    """
+    if not key_passes_total or key_passes_total < 10:
+        return 1.0  # Not enough data — no modifier
+    if not assists_total:
+        assists_total = 0
+    conversion_rate = assists_total / key_passes_total
+    if not league_avg_conversion or league_avg_conversion == 0:
+        return 1.0
+    raw = conversion_rate / league_avg_conversion
+    return round(max(0.70, min(1.30, raw)), 4)
+
+
 # ── FIXTURE DATA PULLERS ──────────────────────────────────────────────────────
 
 def get_todays_fixtures(league_id, today=None):
-    """Pull today's fixtures for a league."""
     if today is None:
         today = date.today().isoformat()
     resp = _sm_get(
@@ -77,11 +87,7 @@ def get_todays_fixtures(league_id, today=None):
 
 
 def pull_fixture_lineups(fixture_id):
-    """Pull lineup for a fixture."""
-    resp = _sm_get(
-        endpoint=f"/fixtures/{fixture_id}",
-        include="lineups",
-    )
+    resp = _sm_get(endpoint=f"/fixtures/{fixture_id}", include="lineups")
     data = resp.get("data", {})
     lineups = data.get("lineups", [])
     if isinstance(lineups, dict):
@@ -90,10 +96,6 @@ def pull_fixture_lineups(fixture_id):
 
 
 def pull_fixture_xg(fixture_id):
-    """
-    Pull per-player xG and xGOT using /expected/lineups endpoint.
-    Returns {player_id: {"xg": float, "xgot": float}}
-    """
     try:
         resp = _sm_get(
             endpoint="/expected/lineups",
@@ -109,20 +111,15 @@ def pull_fixture_xg(fixture_id):
             player_id = item.get("player_id")
             if not player_id:
                 continue
-
             type_id = item.get("type_id")
             val = item.get("data", {}).get("value")
-
             if player_id not in xg_map:
                 xg_map[player_id] = {"xg": None, "xgot": None}
-
-            if type_id == 5304:    # EXPECTED_GOALS
+            if type_id == 5304:
                 xg_map[player_id]["xg"] = val
-            elif type_id == 5305:  # EXPECTED_GOALS_ON_TARGET
+            elif type_id == 5305:
                 xg_map[player_id]["xgot"] = val
-
         return xg_map
-
     except Exception as e:
         print(f"    xG pull error for fixture {fixture_id}: {e}")
         return {}
@@ -131,7 +128,6 @@ def pull_fixture_xg(fixture_id):
 # ── SCORING FUNCTIONS ─────────────────────────────────────────────────────────
 
 def calculate_assist_index(game_kp, game_crosses, game_pass_acc, minutes, baseline):
-    """DC Assist Probability Index."""
     if not baseline or not minutes or minutes < 20:
         return None, {}
 
@@ -165,7 +161,6 @@ def calculate_assist_index(game_kp, game_crosses, game_pass_acc, minutes, baseli
 
 
 def calculate_goal_score(game_sot, minutes, xg_data, baseline):
-    """DC Goal Score."""
     if not baseline or not minutes or minutes < 20:
         return None, {}
 
@@ -198,17 +193,13 @@ def calculate_goal_score(game_sot, minutes, xg_data, baseline):
 
 
 def calculate_tsoa(assist_index, goal_score, game_kp, game_sot):
-    """TSOA dual threat score."""
     if assist_index is None or goal_score is None:
         return None
-
     total = game_kp + game_sot
     dual_threat = (
         min(game_kp, game_sot) / max(game_kp, game_sot)
-        if total > 0 and max(game_kp, game_sot) > 0
-        else 0
+        if total > 0 and max(game_kp, game_sot) > 0 else 0
     )
-
     raw = (assist_index * 0.50) + (goal_score * 0.50)
     return round(raw * (0.7 + dual_threat * 0.3) * 1.6, 4)
 
@@ -216,7 +207,6 @@ def calculate_tsoa(assist_index, goal_score, game_kp, game_sot):
 # ── MAIN MATCH DAY FUNCTION ───────────────────────────────────────────────────
 
 def score_fixture(fixture_id, season_id, league_id, game_date=None):
-    """Score all players in a fixture."""
     if game_date is None:
         game_date = date.today().isoformat()
 
@@ -225,6 +215,18 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
     xg_map  = pull_fixture_xg(fixture_id)
     lineups = pull_fixture_lineups(fixture_id)
     print(f"    Lineups: {len(lineups)} | xG players: {len(xg_map)}")
+
+    try:
+        concession_mults = get_multipliers(fixture_id, season_id, league_id)
+    except Exception as e:
+        print(f"    Concession multipliers unavailable: {e}")
+        concession_mults = {}
+
+    team_ids = list({entry.get("team_id") for entry in lineups if entry.get("team_id")})
+    opponent_lookup = {}
+    if len(team_ids) == 2:
+        opponent_lookup[team_ids[0]] = team_ids[1]
+        opponent_lookup[team_ids[1]] = team_ids[0]
 
     scores = []
 
@@ -237,7 +239,6 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
         if not baseline:
             continue
 
-        minutes   = baseline.get("minutes_played", 90)
         kp        = baseline.get("key_passes_total", 0)
         acc_cross = baseline.get("acc_crosses_total", 0)
         sot       = baseline.get("sot_total", 0)
@@ -263,33 +264,59 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
         if assist_index is None:
             continue
 
+        # ── Positional concession multipliers ──
+        player_team_id   = entry.get("team_id")
+        opponent_team_id = opponent_lookup.get(player_team_id)
+        opponent_mults   = concession_mults.get(opponent_team_id, {}) if opponent_team_id else {}
+
+        detailed_pos_id = baseline.get("detailed_position_id")
+        pos_code = GRANULAR_POSITION_MAP.get(detailed_pos_id, (None, None))[0]
+
+        concession_flag       = None
+        concession_multiplier = 1.0
+
+        if pos_code and opponent_mults:
+            assist_index_adj, assist_mult, assist_flag = apply_concession_multiplier(
+                assist_index, pos_code, opponent_mults, score_type="assist"
+            )
+            goal_score_adj, goal_mult, goal_flag = apply_concession_multiplier(
+                goal_score, pos_code, opponent_mults, score_type="goal"
+            )
+            concession_flag       = assist_flag or goal_flag
+            concession_multiplier = round(max(assist_mult, goal_mult), 2)
+            assist_index          = assist_index_adj
+            goal_score            = goal_score_adj
+            tsoa = calculate_tsoa(assist_index, goal_score, kp_game, sot_game)
+
         scores.append({
-            "fixture_id":        fixture_id,
-            "player_id":         player_id,
-            "player_name":       entry.get("player_name"),
-            "team_id":           entry.get("team_id"),
-            "team_name":         baseline.get("team_name"),
-            "season_id":         season_id,
-            "league_id":         league_id,
-            "league_name":       LEAGUE_NAMES.get(league_id, ""),
-            "game_date":         game_date,
-            "source":            "sportmonks",
-            "minutes_played":    90,
-            "key_passes":        kp_game,
-            "acc_crosses":       acc_cross_game,
-            "pass_accuracy":     round(pass_acc, 4) if pass_acc else None,
-            "sot":               sot_game,
-            "xg_game":           xg_data.get("xg")   if xg_data else None,
-            "xgot_game":         xg_data.get("xgot") if xg_data else None,
-            "assist_index":      assist_index,
-            "goal_score":        goal_score,
-            "tsoa":              tsoa,
-            "assist_grade":      grade_color(assist_index or 0),
-            "goal_grade":        grade_color(goal_score or 0),
-            "tsoa_grade":        grade_color(tsoa or 0),
-            "assist_components": str(a_comp),
-            "goal_components":   str(g_comp),
-            "scored_at":         datetime.utcnow().isoformat(),
+            "fixture_id":            fixture_id,
+            "player_id":             player_id,
+            "player_name":           entry.get("player_name"),
+            "team_id":               player_team_id,
+            "team_name":             baseline.get("team_name"),
+            "season_id":             season_id,
+            "league_id":             league_id,
+            "league_name":           LEAGUE_NAMES.get(league_id, ""),
+            "game_date":             game_date,
+            "source":                "sportmonks",
+            "minutes_played":        90,
+            "key_passes":            kp_game,
+            "acc_crosses":           acc_cross_game,
+            "pass_accuracy":         round(pass_acc, 4) if pass_acc else None,
+            "sot":                   sot_game,
+            "xg_game":               xg_data.get("xg")   if xg_data else None,
+            "xgot_game":             xg_data.get("xgot") if xg_data else None,
+            "assist_index":          assist_index,
+            "goal_score":            goal_score,
+            "tsoa":                  tsoa,
+            "concession_flag":       concession_flag,
+            "concession_multiplier": concession_multiplier,
+            "assist_grade":          grade_color(assist_index or 0),
+            "goal_grade":            grade_color(goal_score or 0),
+            "tsoa_grade":            grade_color(tsoa or 0),
+            "assist_components":     str(a_comp),
+            "goal_components":       str(g_comp),
+            "scored_at":             datetime.utcnow().isoformat(),
         })
 
     if scores:
@@ -302,7 +329,6 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
 
 
 def score_todays_fixtures(leagues=None):
-    """Score all fixtures playing today."""
     today = date.today().isoformat()
     league_config = leagues or [
         {"league_id": 8,    "season_id": 25583},
@@ -342,10 +368,6 @@ def score_todays_fixtures(leagues=None):
 # ── APP DATA FETCHERS ─────────────────────────────────────────────────────────
 
 def get_latest_scores():
-    """
-    Fetch latest match day Sportmonks scores from Supabase.
-    Called by GET /api/sm/data
-    """
     try:
         res = supabase.table("sm_player_scores")\
             .select("*")\
@@ -403,8 +425,8 @@ def get_latest_scores():
 def get_season_scores():
     """
     Calculate season-long DC scores for all players from player_baselines.
-    Scores against league averages, scaled to match distribution targets.
-    Minimum 180 minutes + 2 appearances to appear in rankings.
+    Minimum 180 minutes + 2 appearances.
+    Includes conversion rate modifier on assist index.
     """
     try:
         res = supabase.table("player_baselines")\
@@ -415,12 +437,12 @@ def get_season_scores():
         if not rows:
             return {"players": [], "count": 0, "source": "sportmonks_season", "error": "No baselines found"}
 
-        # ── Step 1: Calculate league averages ─────────────────────────────────
         from collections import defaultdict
 
+        # ── Step 1: League averages ────────────────────────────────────────────
         league_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
-            "goals_per90": [], "pass_acc": []
+            "goals_per90": [], "pass_acc": [], "conversion": []
         })
 
         for row in rows:
@@ -431,6 +453,11 @@ def get_season_scores():
             if row.get("sot_per90"):              league_stats[lid]["sot_per90"].append(row["sot_per90"])
             if row.get("goals_per90"):            league_stats[lid]["goals_per90"].append(row["goals_per90"])
             if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
+            # Conversion rate for league average
+            kp_total = row.get("key_passes_total") or 0
+            a_total  = row.get("assists_total") or 0
+            if kp_total >= 10:
+                league_stats[lid]["conversion"].append(a_total / kp_total)
 
         def avg(lst): return sum(lst) / len(lst) if lst else 0.001
 
@@ -442,6 +469,7 @@ def get_season_scores():
                 "sot_per90":   avg(stats["sot_per90"]),
                 "goals_per90": avg(stats["goals_per90"]),
                 "pass_acc":    avg(stats["pass_acc"]),
+                "conversion":  avg(stats["conversion"]),
             }
 
         # ── Step 2: Score each player ──────────────────────────────────────────
@@ -450,12 +478,11 @@ def get_season_scores():
         for row in rows:
             lid     = row.get("league_id")
             minutes = row.get("minutes_played", 0)
-
-           # Minimum 180 minutes + 2 appearances
             nineties = row.get("nineties", 0) or 0
+
             if not minutes or minutes < 180 or nineties < 2:
                 continue
-              
+
             avgs = league_avgs.get(lid, {})
             if not avgs:
                 continue
@@ -466,21 +493,25 @@ def get_season_scores():
             goals_per90 = row.get("goals_per90")         or 0
             pass_acc    = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
 
-            # Ratios vs league average
             kp_ratio    = kp_per90    / avgs.get("kp_per90",    0.001)
             cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
             pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
             sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
 
-            # DC Assist Index (raw then scaled)
+            # DC Assist Index with conversion rate modifier
             assist_index_raw = (
                 kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
                 cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
                 pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"]
             )
-            assist_index = round(assist_index_raw * ASSIST_SCALE, 4)
+            conv_mod = _conversion_modifier(
+                row.get("assists_total") or 0,
+                row.get("key_passes_total") or 0,
+                avgs.get("conversion", 0.001)
+            )
+            assist_index = round(assist_index_raw * conv_mod * ASSIST_SCALE, 4)
 
-            # DC Goal Score (raw then scaled)
+            # DC Goal Score
             goal_score_raw = (
                 sot_per90   * GOAL_WEIGHTS["sot_per90"] +
                 goals_per90 * GOAL_WEIGHTS["goals_p90"] +
@@ -488,48 +519,44 @@ def get_season_scores():
             )
             goal_score = round(goal_score_raw * GOAL_SCALE, 4)
 
-            # TSOA
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
 
             players.append({
-                "player_id":        row.get("player_id"),
-                "player_name":      row.get("player_name"),
-                "team_id":          row.get("team_id"),
-                "team_name":        row.get("team_name"),   # ← now populated
-                "league_id":        lid,
-                "league_name":      LEAGUE_NAMES.get(lid, ""),
-                "minutes_played":   minutes,
-                "nineties":         row.get("nineties"),
-                # Per-90 stats
-                "kp_per90":         kp_per90,
-                "acc_cross_per90":  cross_per90,
-                "sot_per90":        sot_per90,
-                "goals_per90":      goals_per90,
-                "pass_accuracy":    pass_acc,
-                # League avg context
-                "league_avg_kp":    round(avgs.get("kp_per90", 0), 3),
-                "league_avg_cross": round(avgs.get("cross_per90", 0), 3),
-                "league_avg_sot":   round(avgs.get("sot_per90", 0), 3),
-                # Ratios
-                "kp_ratio":         round(kp_ratio, 3),
-                "cross_ratio":      round(cross_ratio, 3),
-                "pass_acc_ratio":   round(pa_ratio, 3),
-                # Scores (scaled)
-                "assist_index":     assist_index,
-                "goal_score":       goal_score,
-                "tsoa_score":       tsoa,
-                # Grades
-                "assist_grade":     grade_color(assist_index or 0),
-                "goal_grade":       grade_color(goal_score or 0),
-                "tsoa_grade":       grade_color(tsoa or 0),
-                # Baseline refs for modal
+                "player_id":            row.get("player_id"),
+                "player_name":          row.get("player_name"),
+                "team_id":              row.get("team_id"),
+                "team_name":            row.get("team_name"),
+                "league_id":            lid,
+                "league_name":          LEAGUE_NAMES.get(lid, ""),
+                "minutes_played":       minutes,
+                "nineties":             nineties,
+                "kp_per90":             kp_per90,
+                "acc_cross_per90":      cross_per90,
+                "sot_per90":            sot_per90,
+                "goals_per90":          goals_per90,
+                "pass_accuracy":        pass_acc,
+                "assists_total":        row.get("assists_total") or 0,
+                "big_chances_created":  row.get("big_chances_created") or 0,
+                "appearances":          row.get("appearances") or 0,
+                "league_avg_kp":        round(avgs.get("kp_per90", 0), 3),
+                "league_avg_cross":     round(avgs.get("cross_per90", 0), 3),
+                "league_avg_sot":       round(avgs.get("sot_per90", 0), 3),
+                "kp_ratio":             round(kp_ratio, 3),
+                "cross_ratio":          round(cross_ratio, 3),
+                "pass_acc_ratio":       round(pa_ratio, 3),
+                "conversion_modifier":  conv_mod,
+                "assist_index":         assist_index,
+                "goal_score":           goal_score,
+                "tsoa_score":           tsoa,
+                "assist_grade":         grade_color(assist_index or 0),
+                "goal_grade":           grade_color(goal_score or 0),
+                "tsoa_grade":           grade_color(tsoa or 0),
                 "baseline_kp_per90":    kp_per90,
                 "baseline_cross_per90": cross_per90,
                 "baseline_sot_per90":   sot_per90,
                 "data_source":          "season_baseline",
             })
 
-        # Sort by tsoa descending
         players.sort(key=lambda p: p.get("tsoa_score") or 0, reverse=True)
 
         return {
@@ -545,7 +572,6 @@ def get_season_scores():
 
 
 def _safe_xgot_gap(row):
-    """Calculate xGOT gap from stored xg and xgot values."""
     xg   = row.get("xg_game")
     xgot = row.get("xgot_game")
     if xg is not None and xgot is not None:
