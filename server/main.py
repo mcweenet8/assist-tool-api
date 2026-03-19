@@ -206,26 +206,129 @@ def sm_refresh_today():
     return jsonify({"status": "ok", "message": "SM refresh started in background"})
 
 
+# League → season_id mapping for team stats lookup
+LEAGUE_SEASON_MAP = {
+    8:    25583,  # Premier League
+    9:    25648,  # Championship
+    564:  25659,  # La Liga
+    384:  25533,  # Serie A
+    82:   25646,  # Bundesliga
+    301:  25651,  # Ligue 1
+    779:  26720,  # MLS
+    1356: 26529,  # A-League Men
+}
+
+def _get_team_ha_stats(team_id, season_id):
+    """
+    Pull home/away splits for a team from Sportmonks team statistics.
+    Returns dict with gf/ga home/away splits and per-game rates.
+    """
+    import requests as req
+    token = os.environ.get("SPORTMONKS_API_TOKEN")
+    base  = "https://api.sportmonks.com/v3/football"
+
+    try:
+        r = req.get(
+            f"{base}/statistics/seasons/teams/{team_id}",
+            params={"api_token": token},
+            timeout=15
+        )
+        if r.status_code != 200:
+            return {}
+
+        records = r.json().get("data", [])
+        # Find the correct season
+        season_record = next((rec for rec in records if rec.get("season_id") == season_id and rec.get("has_values")), None)
+        if not season_record:
+            return {}
+
+        details = {d["type_id"]: d["value"] for d in season_record.get("details", [])}
+
+        def get_count(type_id, scope="all"):
+            val = details.get(type_id, {})
+            if isinstance(val, dict):
+                return val.get(scope, {}).get("count", 0) or val.get(scope, {}).get("average", 0) or 0
+            return 0
+
+        def get_avg(type_id, scope="all"):
+            val = details.get(type_id, {})
+            if isinstance(val, dict):
+                return val.get(scope, {}).get("average", 0) or 0
+            return 0
+
+        # Goals for (52) and goals against (88)
+        gf_home = get_count(52, "home")
+        gf_away = get_count(52, "away")
+        gf_all  = get_count(52, "all")
+        ga_home = get_count(88, "home")
+        ga_away = get_count(88, "away")
+        ga_all  = get_count(88, "all")
+
+        # Wins (214), Losses (192), Clean sheets (194)
+        wins_home   = get_count(214, "home")
+        wins_away   = get_count(214, "away")
+        losses_home = get_count(192, "home")
+        losses_away = get_count(192, "away")
+        cs_home     = get_count(194, "home")
+        cs_away     = get_count(194, "away")
+
+        # Calculate games played home/away from wins+draws+losses
+        # Use overall played from standings cache as fallback
+        # Approximate home/away games as total/2
+        total_games = gf_all  # proxy
+        home_games  = wins_home + losses_home + (get_count(214, "all") - wins_home - wins_away)  # rough
+        # Simpler — use average goals which SM provides
+        gf_pg_home = get_avg(52, "home")
+        gf_pg_away = get_avg(52, "away")
+        ga_pg_home = get_avg(88, "home")
+        ga_pg_away = get_avg(88, "away")
+
+        return {
+            "gf_all":       gf_all,
+            "gf_home":      gf_home,
+            "gf_away":      gf_away,
+            "ga_all":       ga_all,
+            "ga_home":      ga_home,
+            "ga_away":      ga_away,
+            "gf_pg_home":   round(gf_pg_home, 2),
+            "gf_pg_away":   round(gf_pg_away, 2),
+            "ga_pg_home":   round(ga_pg_home, 2),
+            "ga_pg_away":   round(ga_pg_away, 2),
+            "wins_home":    wins_home,
+            "wins_away":    wins_away,
+            "losses_home":  losses_home,
+            "losses_away":  losses_away,
+            "cs_home":      cs_home,
+            "cs_away":      cs_away,
+            "weak_def_home": ga_pg_home >= 1.5,
+            "weak_def_away": ga_pg_away >= 1.5,
+        }
+    except Exception as e:
+        log.error(f"team ha stats error {team_id}: {e}")
+        return {}
+
+
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
     """
-    Return home + away squad DC scores for a fixture.
-    Pulls team IDs from SM fixtures cache, then scores from player_baselines.
+    Return home + away squad DC scores + home/away stats for a fixture.
     """
     try:
-        from supabase import create_client
-        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
-
-        # Find fixture in cache to get team IDs and names
+        # Find fixture in cache
         fixtures = _cache.get("fixtures", {})
-        home_id = away_id = home_name = away_name = None
+        home_id = away_id = home_name = away_name = league_id = None
         for league, matches in fixtures.items():
             for m in matches:
                 if str(m.get("match_id")) == str(fixture_id):
-                    home_id   = m.get("home_id")
-                    away_id   = m.get("away_id")
-                    home_name = m.get("home")
-                    away_name = m.get("away")
+                    home_id    = m.get("home_id")
+                    away_id    = m.get("away_id")
+                    home_name  = m.get("home")
+                    away_name  = m.get("away")
+                    # Find league_id from league name
+                    for lid, lname in {8:"Premier League",9:"Championship",564:"La Liga",384:"Serie A",82:"Bundesliga",301:"Ligue 1",779:"MLS",1356:"A-League Men"}.items():
+                        if lname == league:
+                            league_id = lid
+                            break
                     break
             if home_id:
                 break
@@ -233,28 +336,31 @@ def sm_match(fixture_id):
         if not home_id or not away_id:
             return jsonify({"error": "Fixture not found in cache — hit Refresh"}), 404
 
-        # Pull season scores for both teams from get_season_scores cache
-        # or calculate inline from baselines
+        # Get season_id for this league
+        season_id = LEAGUE_SEASON_MAP.get(league_id)
+
+        # Pull squad DC scores
         season_data = get_season_scores()
         all_players = season_data.get("players", [])
+        home_players = sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
+        away_players = sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
 
-        home_players = [p for p in all_players if str(p.get("team_id")) == str(home_id)]
-        away_players = [p for p in all_players if str(p.get("team_id")) == str(away_id)]
-
-        # Sort by tsoa descending
-        home_players = sorted(home_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
-        away_players = sorted(away_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
+        # Pull home/away stats on demand
+        home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
+        away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
 
         return jsonify({
-            "fixture_id":    fixture_id,
-            "home":          home_name,
-            "away":          away_name,
-            "home_id":       home_id,
-            "away_id":       away_id,
-            "home_players":  home_players[:15],
-            "away_players":  away_players[:15],
-            "total_home":    len(home_players),
-            "total_away":    len(away_players),
+            "fixture_id":   fixture_id,
+            "home":         home_name,
+            "away":         away_name,
+            "home_id":      home_id,
+            "away_id":      away_id,
+            "home_players": home_players[:15],
+            "away_players": away_players[:15],
+            "total_home":   len(home_players),
+            "total_away":   len(away_players),
+            "home_ha":      home_ha,
+            "away_ha":      away_ha,
         })
 
     except Exception as e:
