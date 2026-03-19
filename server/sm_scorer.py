@@ -20,8 +20,9 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ── SCORING WEIGHTS ───────────────────────────────────────────────────────────
 
 ASSIST_WEIGHTS = {
-    "kp_ratio":       0.55,
-    "cross_ratio":    0.35,
+    "kp_ratio":       0.45,
+    "cross_ratio":    0.25,
+    "bc_ratio":       0.20,
     "pass_acc_ratio": 0.10,
 }
 
@@ -442,7 +443,7 @@ def get_season_scores():
         # ── Step 1: League averages ────────────────────────────────────────────
         league_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
-            "goals_per90": [], "pass_acc": [], "conversion": []
+            "goals_per90": [], "pass_acc": [], "conversion": [], "bc_per90": []
         })
 
         for row in rows:
@@ -453,6 +454,7 @@ def get_season_scores():
             if row.get("sot_per90"):              league_stats[lid]["sot_per90"].append(row["sot_per90"])
             if row.get("goals_per90"):            league_stats[lid]["goals_per90"].append(row["goals_per90"])
             if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
+            if row.get("big_chances_per90"):      league_stats[lid]["bc_per90"].append(row["big_chances_per90"])
             # Conversion rate for league average
             # Only include players with confirmed fresh bootstrap data (appearances > 0)
             kp_total = row.get("key_passes_total") or 0
@@ -471,6 +473,7 @@ def get_season_scores():
                 "goals_per90": avg(stats["goals_per90"]),
                 "pass_acc":    avg(stats["pass_acc"]),
                 "conversion":  avg(stats["conversion"]),
+                "bc_per90":    avg(stats["bc_per90"]),
             }
 
         # ── Step 2: Score each player ──────────────────────────────────────────
@@ -498,11 +501,14 @@ def get_season_scores():
             cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
             pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
             sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
+            bc_per90    = row.get("big_chances_per90") or 0
+            bc_ratio    = bc_per90    / avgs.get("bc_per90",    0.001)
 
             # DC Assist Index with conversion rate modifier
             assist_index_raw = (
                 kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
                 cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
+                bc_ratio    * ASSIST_WEIGHTS["bc_ratio"] +
                 pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"]
             )
             conv_mod = _conversion_modifier(
@@ -544,6 +550,7 @@ def get_season_scores():
                 "league_avg_sot":       round(avgs.get("sot_per90", 0), 3),
                 "kp_ratio":             round(kp_ratio, 3),
                 "cross_ratio":          round(cross_ratio, 3),
+                "bc_ratio":             round(bc_ratio, 3),
                 "pass_acc_ratio":       round(pa_ratio, 3),
                 "conversion_modifier":  conv_mod,
                 "assist_index":         assist_index,
