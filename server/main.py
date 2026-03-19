@@ -530,6 +530,7 @@ from .positional_concessions import bootstrap_season, update_after_match, get_mu
 from .sm_baseline import bootstrap_baselines, refresh_baselines
 from .sm_scorer import score_todays_fixtures, get_latest_scores, get_season_scores
 from .pipeline_comparison import build_comparison_for_date, record_outcomes, get_running_totals
+from .sm_fixtures import get_sm_fixtures
 
 
 @app.route('/api/concessions/bootstrap', methods=['POST'])
@@ -552,7 +553,37 @@ def baseline_bootstrap():
 def sm_score_today():
     score_todays_fixtures()
     return jsonify({"status": "ok"})
-  
+
+
+@app.route('/api/sm/data', methods=['GET'])
+def sm_data():
+    return jsonify(get_latest_scores())
+
+
+@app.route('/api/sm/season', methods=['GET'])
+def sm_season():
+    return jsonify(get_season_scores())
+
+
+@app.route('/api/sm/fixtures', methods=['GET'])
+def sm_fixtures():
+    """
+    Sportmonks-backed fixtures endpoint.
+    Drop-in replacement for /fixtures — same response format.
+    """
+    try:
+        days = request.args.get('days', 7, type=int)
+        fixture_data = get_sm_fixtures(days=days)
+        return jsonify({
+            "fixtures":     fixture_data,
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "source":       "sportmonks",
+        })
+    except Exception as e:
+        log.error(f"sm_fixtures error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/sm/refresh-today', methods=['POST'])
 def sm_refresh_today():
     import threading
@@ -563,15 +594,6 @@ def sm_refresh_today():
     thread.daemon = True
     thread.start()
     return jsonify({"status": "ok", "message": "SM refresh started in background"})
-
-@app.route('/api/sm/data', methods=['GET'])
-def sm_data():
-    return jsonify(get_latest_scores())
-
-
-@app.route('/api/sm/season', methods=['GET'])
-def sm_season():
-    return jsonify(get_season_scores())
 
 
 @app.route('/api/comparison/build', methods=['POST'])
@@ -584,6 +606,7 @@ def comparison_build():
     thread.start()
     return jsonify({"status": "ok", "message": "Comparison build started in background"})
 
+
 @app.route('/api/comparison/outcomes', methods=['POST'])
 def comparison_outcomes():
     import threading
@@ -593,6 +616,7 @@ def comparison_outcomes():
     thread.daemon = True
     thread.start()
     return jsonify({"status": "ok", "message": "Outcomes recording started in background"})
+
 
 @app.route('/api/comparison/results', methods=['GET'])
 def comparison_results():
