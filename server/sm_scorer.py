@@ -454,9 +454,10 @@ def get_season_scores():
             if row.get("goals_per90"):            league_stats[lid]["goals_per90"].append(row["goals_per90"])
             if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
             # Conversion rate for league average
+            # Only include players with confirmed fresh bootstrap data (appearances > 0)
             kp_total = row.get("key_passes_total") or 0
             a_total  = row.get("assists_total") or 0
-            if kp_total >= 10:
+            if kp_total >= 10 and a_total >= 1 and (row.get("appearances") or 0) > 0:
                 league_stats[lid]["conversion"].append(a_total / kp_total)
 
         def avg(lst): return sum(lst) / len(lst) if lst else 0.001
