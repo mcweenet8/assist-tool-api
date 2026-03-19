@@ -167,6 +167,62 @@ def sm_refresh_today():
     return jsonify({"status": "ok", "message": "SM refresh started in background"})
 
 
+@app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
+def sm_match(fixture_id):
+    """
+    Return home + away squad DC scores for a fixture.
+    Pulls team IDs from SM fixtures cache, then scores from player_baselines.
+    """
+    try:
+        from supabase import create_client
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+
+        # Find fixture in cache to get team IDs and names
+        fixtures = _cache.get("fixtures", {})
+        home_id = away_id = home_name = away_name = None
+        for league, matches in fixtures.items():
+            for m in matches:
+                if str(m.get("match_id")) == str(fixture_id):
+                    home_id   = m.get("home_id")
+                    away_id   = m.get("away_id")
+                    home_name = m.get("home")
+                    away_name = m.get("away")
+                    break
+            if home_id:
+                break
+
+        if not home_id or not away_id:
+            return jsonify({"error": "Fixture not found in cache — hit Refresh"}), 404
+
+        # Pull season scores for both teams from get_season_scores cache
+        # or calculate inline from baselines
+        season_data = get_season_scores()
+        all_players = season_data.get("players", [])
+
+        home_players = [p for p in all_players if str(p.get("team_id")) == str(home_id)]
+        away_players = [p for p in all_players if str(p.get("team_id")) == str(away_id)]
+
+        # Sort by tsoa descending
+        home_players = sorted(home_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
+        away_players = sorted(away_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
+
+        return jsonify({
+            "fixture_id":    fixture_id,
+            "home":          home_name,
+            "away":          away_name,
+            "home_id":       home_id,
+            "away_id":       away_id,
+            "home_players":  home_players[:15],
+            "away_players":  away_players[:15],
+            "total_home":    len(home_players),
+            "total_away":    len(away_players),
+        })
+
+    except Exception as e:
+        log.error(f"sm_match {fixture_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Baseline / concessions bootstrap ─────────────────────────────────────────
 
 @app.route('/api/baseline/bootstrap', methods=['POST'])
