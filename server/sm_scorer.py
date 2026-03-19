@@ -70,8 +70,7 @@ def _conversion_modifier(assists_total, key_passes_total, league_avg_conversion)
     if not league_avg_conversion or league_avg_conversion == 0:
         return 1.0
     raw = conversion_rate / league_avg_conversion
-    return round(max(0.70, min(1.30, raw)), 4)
-
+    return return round(max(0.80, min(1.15, raw)), 4)
 
 # ── FIXTURE DATA PULLERS ──────────────────────────────────────────────────────
 
