@@ -81,8 +81,26 @@ def fixtures():
 
 @app.route("/refresh", methods=["GET", "POST"])
 def refresh():
+    import threading
     _cache["status"]          = "refreshing"
     _cache["refresh_started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Kick off SM fixtures refresh in background
+    def refresh_sm_fixtures():
+        try:
+            from .sm_fixtures import get_sm_fixtures
+            log.info("SM fixtures refresh starting...")
+            fixtures = get_sm_fixtures(days=7)
+            _cache["fixtures"] = fixtures
+            _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            log.info(f"SM fixtures refreshed: {sum(len(v) for v in fixtures.values())} total")
+        except Exception as e:
+            log.error(f"SM fixtures refresh failed: {e}")
+
+    fix_thread = threading.Thread(target=refresh_sm_fixtures)
+    fix_thread.daemon = True
+    fix_thread.start()
+
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -93,7 +111,6 @@ def refresh():
         _cache.update({
             "top25":         top25,
             "by_league":     by_league,
-            "fixtures":      fix,
             "last_updated":  datetime.now().strftime("%Y-%m-%d %H:%M"),
             "status":        "ok",
             "all_players":   all_players_full,
@@ -568,28 +585,46 @@ def sm_season():
 @app.route('/api/sm/fixtures', methods=['GET'])
 def sm_fixtures():
     """
-    Sportmonks-backed fixtures endpoint.
-    Drop-in replacement for /fixtures — same response format.
+    Sportmonks-backed fixtures — reads from cache populated by /refresh.
+    Falls back to live fetch if cache is empty.
     """
-    try:
-        days = request.args.get('days', 7, type=int)
-        fixture_data = get_sm_fixtures(days=days)
+    fixtures = _cache.get("fixtures")
+    if fixtures:
         return jsonify({
-            "fixtures":     fixture_data,
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "fixtures":     fixtures,
+            "last_updated": _cache.get("fixtures_last_updated", _cache.get("last_updated", "")),
             "source":       "sportmonks",
         })
-    except Exception as e:
-        log.error(f"sm_fixtures error: {e}")
-        return jsonify({"error": str(e)}), 500
+    # Cache empty — trigger background fetch and return empty
+    import threading
+    def bg_fetch():
+        try:
+            f = get_sm_fixtures(days=7)
+            _cache["fixtures"] = f
+            _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        except Exception as e:
+            log.error(f"bg sm_fixtures: {e}")
+    t = threading.Thread(target=bg_fetch)
+    t.daemon = True
+    t.start()
+    return jsonify({"fixtures": {}, "last_updated": "", "source": "sportmonks", "loading": True})
 
 
 @app.route('/api/sm/refresh-today', methods=['POST'])
 def sm_refresh_today():
     import threading
     def run():
+        # Score today
         score_todays_fixtures()
         build_comparison_for_date()
+        # Refresh fixtures cache
+        try:
+            fixtures = get_sm_fixtures(days=7)
+            _cache["fixtures"] = fixtures
+            _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            log.info(f"SM fixtures refreshed via refresh-today")
+        except Exception as e:
+            log.error(f"SM fixtures refresh-today failed: {e}")
     thread = threading.Thread(target=run)
     thread.daemon = True
     thread.start()
