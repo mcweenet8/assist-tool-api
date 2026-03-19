@@ -85,9 +85,11 @@ def refresh():
     _cache["status"]          = "refreshing"
     _cache["refresh_started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def run_sm_refresh():
-        try:
-            # 1. Refresh SM fixtures
+   def run_sm_refresh():
+    try:
+        _cache["status"] = "ok"
+        _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # 1. Refresh SM fixtures
             log.info("SM fixtures refresh starting...")
             fixtures = get_sm_fixtures(days=7)
             _cache["fixtures"] = fixtures
