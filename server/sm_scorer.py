@@ -70,7 +70,8 @@ def _conversion_modifier(assists_total, key_passes_total, league_avg_conversion)
     if not league_avg_conversion or league_avg_conversion == 0:
         return 1.0
     raw = conversion_rate / league_avg_conversion
-    return return round(max(0.80, min(1.15, raw)), 4)
+    return round(max(0.70, min(1.30, raw)), 4)
+
 
 # ── FIXTURE DATA PULLERS ──────────────────────────────────────────────────────
 
@@ -455,8 +456,8 @@ def get_season_scores():
             # Conversion rate for league average
             kp_total = row.get("key_passes_total") or 0
             a_total  = row.get("assists_total") or 0
-          if kp_total >= 10 and a_total >= 1:
-                league_stats[lid]["conversion"].append(a_total / kp_total) kp_total)
+            if kp_total >= 10:
+                league_stats[lid]["conversion"].append(a_total / kp_total)
 
         def avg(lst): return sum(lst) / len(lst) if lst else 0.001
 
