@@ -8,7 +8,6 @@ import requests
 from datetime import datetime, date
 from supabase import create_client
 from .sm_baseline import get_player_baseline, TYPE_IDS, _extract_stat, _sm_get
-from .positional_concessions import get_multipliers, apply_concession_multiplier, GRANULAR_POSITION_MAP
 
 SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN")
 SUPABASE_URL     = os.environ.get("SUPABASE_URL")
