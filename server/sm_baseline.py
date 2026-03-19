@@ -47,6 +47,10 @@ TYPE_IDS = {
     "SUCCESSFUL_DRIBBLES":        109,
     "FOULS_DRAWN":                96,
     "LONG_BALLS_WON":             123,
+    "ASSISTS":                    79,
+    "BIG_CHANCES_CREATED":        580,
+    "BIG_CHANCES_MISSED":         581,
+    "APPEARANCES":                83,
 }
 
 
@@ -56,9 +60,9 @@ def _sm_get(endpoint, filters=None, include=None, extra_params=None, page=None):
     """Sportmonks API GET using Authorization header."""
     headers = {"Authorization": SPORTMONKS_TOKEN}
     params = {}
-    if filters:  params["filters"] = filters
-    if include:  params["include"] = include
-    if page:     params["page"] = page
+    if filters:      params["filters"] = filters
+    if include:      params["include"] = include
+    if page:         params["page"] = page
     if extra_params: params.update(extra_params)
 
     response = requests.get(
@@ -102,7 +106,6 @@ def _get_teams_for_season(season_id):
         data = resp.get("data", [])
         if isinstance(data, dict):
             data = data.get("data", [])
-        # Return list of {id, name} dicts
         return [
             {"id": t.get("id"), "name": t.get("name") or t.get("short_code") or ""}
             for t in data if t.get("id")
@@ -140,16 +143,6 @@ def _get_squad_with_stats(team_id, season_id):
 def _calculate_baseline(player, details, season_id, team_id=None, team_name=None):
     """
     Calculate per-90 baselines from a player object and their season details.
-
-    Args:
-        player:    the player dict (has id, name, position_id etc)
-        details:   the details array for the specific season we want
-        season_id: the season we're calculating for
-        team_id:   the team this player belongs to (from squad entry)
-        team_name: the team name (from teams endpoint)
-
-    Returns:
-        baseline dict or None if insufficient data
     """
     minutes      = _extract_stat(details, TYPE_IDS["MINUTES_PLAYED"])
     key_passes   = _extract_stat(details, TYPE_IDS["KEY_PASSES"])
@@ -160,6 +153,9 @@ def _calculate_baseline(player, details, season_id, team_id=None, team_name=None
     sot          = _extract_stat(details, TYPE_IDS["SHOTS_ON_TARGET"])
     goals        = _extract_stat(details, TYPE_IDS["GOALS"])
     dribbles     = _extract_stat(details, TYPE_IDS["SUCCESSFUL_DRIBBLES"])
+    assists      = _extract_stat(details, TYPE_IDS["ASSISTS"])
+    big_chances  = _extract_stat(details, TYPE_IDS["BIG_CHANCES_CREATED"])
+    appearances  = _extract_stat(details, TYPE_IDS["APPEARANCES"])
 
     # Must have played at least 90 minutes
     if not minutes or minutes < 90:
@@ -182,21 +178,26 @@ def _calculate_baseline(player, details, season_id, team_id=None, team_name=None
     return {
         "player_id":              player.get("id"),
         "player_name":            player.get("display_name") or player.get("name"),
-        "team_id":                team_id,       # ← now populated from squad entry
-        "team_name":              team_name,     # ← now populated from teams endpoint
+        "team_id":                team_id,
+        "team_name":              team_name,
         "season_id":              season_id,
         "position_id":            player.get("position_id"),
         "detailed_position_id":   player.get("detailed_position_id"),
         "minutes_played":         minutes,
         "nineties":               round(nineties, 2),
-        "key_passes_total":       key_passes or 0,
-        "acc_crosses_total":      acc_crosses or 0,
-        "sot_total":              sot or 0,
-        "goals_total":            goals or 0,
+        "key_passes_total":       key_passes   or 0,
+        "acc_crosses_total":      acc_crosses  or 0,
+        "sot_total":              sot          or 0,
+        "goals_total":            goals        or 0,
+        "assists_total":          assists      or 0,
+        "big_chances_created":    big_chances  or 0,
+        "appearances":            appearances  or 0,
         "kp_per90":               per90(key_passes),
         "acc_cross_per90":        per90(acc_crosses),
         "sot_per90":              per90(sot),
         "goals_per90":            per90(goals),
+        "assists_per90":          per90(assists),
+        "big_chances_per90":      per90(big_chances),
         "dribbles_per90":         per90(dribbles),
         "pass_accuracy_baseline": pass_accuracy,
         "xg_per90":               None,
@@ -238,7 +239,8 @@ def bootstrap_baselines(leagues=None):
       2. For each team get squad
          with player stats nested        (~1 API call per team)
       3. Filter stats for current season
-      4. Store in player_baselines with team_id and team_name
+      4. Store in player_baselines with team_id, team_name,
+         assists_total, big_chances_created, appearances
 
     Total: ~21 API calls per league, ~170 for all 8 leagues.
     """
@@ -253,7 +255,6 @@ def bootstrap_baselines(leagues=None):
     for league in target_leagues:
         print(f"\n  {league['name']} (season {league['season_id']})")
 
-        # Step 1 — get teams with names
         teams = _get_teams_for_season(league["season_id"])
         print(f"    Teams found: {len(teams)}")
 
@@ -263,7 +264,6 @@ def bootstrap_baselines(leagues=None):
 
         stored = skipped = 0
 
-        # Step 2 — get squad + stats for each team
         for i, team in enumerate(teams):
             team_id   = team["id"]
             team_name = team["name"]
@@ -271,7 +271,6 @@ def bootstrap_baselines(leagues=None):
             squad = _get_squad_with_stats(team_id, league["season_id"])
 
             for entry in squad:
-                # Get the nested player object
                 player = entry.get("player", {})
                 if isinstance(player, dict) and "data" in player:
                     player = player["data"]
@@ -280,7 +279,6 @@ def bootstrap_baselines(leagues=None):
                     skipped += 1
                     continue
 
-                # Find this season's stats
                 statistics = player.get("statistics", [])
                 if isinstance(statistics, dict):
                     statistics = statistics.get("data", [])
@@ -304,7 +302,6 @@ def bootstrap_baselines(leagues=None):
                     skipped += 1
                     continue
 
-                # Calculate baseline — now passing team_id and team_name
                 baseline = _calculate_baseline(
                     player, details, league["season_id"],
                     team_id=team_id,
