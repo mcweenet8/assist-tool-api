@@ -552,6 +552,7 @@ def baseline_bootstrap():
 def sm_score_today():
     score_todays_fixtures()
     return jsonify({"status": "ok"})
+  
 @app.route('/api/sm/refresh-today', methods=['POST'])
 def sm_refresh_today():
     import threading
