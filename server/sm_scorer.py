@@ -403,8 +403,8 @@ def get_latest_scores():
 def get_season_scores():
     """
     Calculate season-long DC scores for all players from player_baselines.
-    Scores against league averages, scaled ×2.0 to match FotMob distribution.
-    Minimum 270 minutes (3 full games) to appear in rankings.
+    Scores against league averages, scaled to match distribution targets.
+    Minimum 180 minutes + 2 appearances to appear in rankings.
     """
     try:
         res = supabase.table("player_baselines")\
@@ -451,10 +451,11 @@ def get_season_scores():
             lid     = row.get("league_id")
             minutes = row.get("minutes_played", 0)
 
-            # Minimum 270 minutes (3 full games)
-            if not minutes or minutes < 270:
+           # Minimum 180 minutes + 2 appearances
+            nineties = row.get("nineties", 0) or 0
+            if not minutes or minutes < 180 or nineties < 2:
                 continue
-
+              
             avgs = league_avgs.get(lid, {})
             if not avgs:
                 continue
