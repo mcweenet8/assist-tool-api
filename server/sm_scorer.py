@@ -36,8 +36,10 @@ GOAL_WEIGHTS = {
     "goals_p90": 0.20,
 }
 
-# Score scaling factor — aligns SM distribution with FotMob range
-SCORE_SCALE = 2.0
+# Score scaling — per market to match FotMob distribution
+# Targets: Assist ~56 players >3.0, Goals ~38, TSOA ~84
+ASSIST_SCALE = 0.85
+GOAL_SCALE   = 3.5
 
 # League name lookup
 LEAGUE_NAMES = {
@@ -474,7 +476,7 @@ def get_season_scores():
                 cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
                 pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"]
             )
-            assist_index = round(assist_index_raw * SCORE_SCALE, 4)
+            assist_index = round(assist_index_raw * ASSIST_SCALE, 4)
 
             # DC Goal Score (raw then scaled)
             goal_score_raw = (
@@ -482,7 +484,7 @@ def get_season_scores():
                 goals_per90 * GOAL_WEIGHTS["goals_p90"] +
                 sot_ratio   * GOAL_WEIGHTS["xgot_gap"]
             )
-            goal_score = round(goal_score_raw * SCORE_SCALE, 4)
+            goal_score = round(goal_score_raw * GOAL_SCALE, 4)
 
             # TSOA
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
