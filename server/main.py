@@ -96,6 +96,45 @@ def refresh():
             score_todays_fixtures()
             build_comparison_for_date()
 
+            # 3. Refresh standings
+            try:
+                import requests as req
+                token = os.environ.get("SPORTMONKS_API_TOKEN")
+                base  = "https://api.sportmonks.com/v3/football"
+                LEAGUES_S = [
+                    {"season_id": 25583, "name": "Premier League"},
+                    {"season_id": 25648, "name": "Championship"},
+                    {"season_id": 25659, "name": "La Liga"},
+                    {"season_id": 25533, "name": "Serie A"},
+                    {"season_id": 25646, "name": "Bundesliga"},
+                    {"season_id": 25651, "name": "Ligue 1"},
+                    {"season_id": 26720, "name": "MLS"},
+                    {"season_id": 26529, "name": "A-League Men"},
+                ]
+                GP=129;W=130;L=131;D=132;GF=133;GA=134;CS=135;PTS=187
+                def gv(dets,tid):
+                    for d in dets:
+                        if d.get("type_id")==tid: return d.get("value",0)
+                    return 0
+                standings_result = {}
+                for lg in LEAGUES_S:
+                    r = req.get(f"{base}/standings/seasons/{lg['season_id']}",
+                        params={"api_token":token,"include":"participant;details"},timeout=30)
+                    if r.status_code!=200: continue
+                    rows=r.json().get("data",[])
+                    teams=[]
+                    for row in rows:
+                        p=row.get("participant",{});dets=row.get("details",[])
+                        gp=gv(dets,GP);gf=gv(dets,GF);ga=gv(dets,GA)
+                        teams.append({"position":row.get("position"),"team_id":str(p.get("id","")),"team":p.get("name",""),"short_code":p.get("short_code",""),"logo":p.get("image_path",""),"played":gp,"wins":gv(dets,W),"draws":gv(dets,D),"losses":gv(dets,L),"goals_for":gf,"goals_against":ga,"clean_sheets":gv(dets,CS),"points":row.get("points",0),"gf_pg":round(gf/gp,2) if gp else 0,"ga_pg":round(ga/gp,2) if gp else 0,"goal_diff":gf-ga,"weak_def":(round(ga/gp,2) if gp else 0)>=1.5,"league":lg["name"]})
+                    teams.sort(key=lambda x:x["position"] or 99)
+                    standings_result[lg["name"]]=teams
+                _cache["standings"]=standings_result
+                _cache["standings_last_updated"]=datetime.now().strftime("%Y-%m-%d %H:%M")
+                log.info("Standings refreshed")
+            except Exception as e:
+                log.error(f"standings refresh error: {e}")
+
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info("SM refresh complete")
         except Exception as e:
@@ -221,6 +260,113 @@ def sm_match(fixture_id):
     except Exception as e:
         log.error(f"sm_match {fixture_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/sm/standings', methods=['GET'])
+def sm_standings():
+    """
+    Return league standings for all tracked leagues from Sportmonks.
+    Cached for 1 hour — refreshed on /refresh call.
+    """
+    # Serve from cache if available
+    if _cache.get("standings"):
+        return jsonify({
+            "standings":    _cache["standings"],
+            "last_updated": _cache.get("standings_last_updated", ""),
+            "source":       "sportmonks",
+        })
+
+    # Build standings in background and return empty
+    import threading
+    def fetch_standings():
+        try:
+            import requests as req
+            token = os.environ.get("SPORTMONKS_API_TOKEN")
+            base  = "https://api.sportmonks.com/v3/football"
+
+            LEAGUES = [
+                {"league_id": 8,    "season_id": 25583, "name": "Premier League"},
+                {"league_id": 9,    "season_id": 25648, "name": "Championship"},
+                {"league_id": 564,  "season_id": 25659, "name": "La Liga"},
+                {"league_id": 384,  "season_id": 25533, "name": "Serie A"},
+                {"league_id": 82,   "season_id": 25646, "name": "Bundesliga"},
+                {"league_id": 301,  "season_id": 25651, "name": "Ligue 1"},
+                {"league_id": 779,  "season_id": 26720, "name": "MLS"},
+                {"league_id": 1356, "season_id": 26529, "name": "A-League Men"},
+            ]
+
+            # Standing detail type_ids
+            GP  = 129  # games played
+            W   = 130  # wins
+            L   = 131  # losses
+            D   = 132  # draws (home)
+            GF  = 133  # goals for
+            GA  = 134  # goals against
+            CS  = 135  # clean sheets
+            PTS = 187  # points
+
+            def get_val(details, type_id):
+                for d in details:
+                    if d.get("type_id") == type_id:
+                        return d.get("value", 0)
+                return 0
+
+            result = {}
+
+            for league in LEAGUES:
+                r = req.get(
+                    f"{base}/standings/seasons/{league['season_id']}",
+                    params={"api_token": token, "include": "participant;details"},
+                    timeout=30
+                )
+                if r.status_code != 200:
+                    continue
+
+                rows = r.json().get("data", [])
+                teams = []
+                for row in rows:
+                    p    = row.get("participant", {})
+                    dets = row.get("details", [])
+                    gp   = get_val(dets, GP)
+                    gf   = get_val(dets, GF)
+                    ga   = get_val(dets, GA)
+                    ga_pg = round(ga / gp, 2) if gp else 0
+                    gf_pg = round(gf / gp, 2) if gp else 0
+                    teams.append({
+                        "position":   row.get("position"),
+                        "team_id":    str(p.get("id","")),
+                        "team":       p.get("name",""),
+                        "short_code": p.get("short_code",""),
+                        "logo":       p.get("image_path",""),
+                        "played":     gp,
+                        "wins":       get_val(dets, W),
+                        "draws":      get_val(dets, D),
+                        "losses":     get_val(dets, L),
+                        "goals_for":  gf,
+                        "goals_against": ga,
+                        "clean_sheets":  get_val(dets, CS),
+                        "points":     row.get("points", 0),
+                        "gf_pg":      gf_pg,
+                        "ga_pg":      ga_pg,
+                        "goal_diff":  gf - ga,
+                        "weak_def":   ga_pg >= 1.5,
+                        "league_id":  league["league_id"],
+                        "league":     league["name"],
+                    })
+
+                teams.sort(key=lambda x: x["position"] or 99)
+                result[league["name"]] = teams
+                log.info(f"Standings loaded: {league['name']} ({len(teams)} teams)")
+
+            _cache["standings"]             = result
+            _cache["standings_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            log.info("All standings cached")
+
+        except Exception as e:
+            log.error(f"standings fetch error: {e}")
+
+    threading.Thread(target=fetch_standings, daemon=True).start()
+    return jsonify({"standings": {}, "last_updated": "", "source": "sportmonks", "loading": True})
 
 
 # ── Baseline / concessions bootstrap ─────────────────────────────────────────
