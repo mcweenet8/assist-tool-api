@@ -455,8 +455,8 @@ def get_season_scores():
             # Conversion rate for league average
             kp_total = row.get("key_passes_total") or 0
             a_total  = row.get("assists_total") or 0
-           if kp_total >= 10 and a_total >= 1:
-    league_stats[lid]["conversion"].append(a_total / kp_total)
+          if kp_total >= 10 and a_total >= 1:
+                league_stats[lid]["conversion"].append(a_total / kp_total) kp_total)
 
         def avg(lst): return sum(lst) / len(lst) if lst else 0.001
 
