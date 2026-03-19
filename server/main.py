@@ -566,15 +566,23 @@ def sm_season():
 
 @app.route('/api/comparison/build', methods=['POST'])
 def comparison_build():
-    build_comparison_for_date()
-    return jsonify({"status": "ok"})
-
+    import threading
+    data = request.json or {}
+    game_date = data.get('date', None)
+    thread = threading.Thread(target=build_comparison_for_date, args=(game_date,))
+    thread.daemon = True
+    thread.start()
+    return jsonify({"status": "ok", "message": "Comparison build started in background"})
 
 @app.route('/api/comparison/outcomes', methods=['POST'])
 def comparison_outcomes():
-    record_outcomes()
-    return jsonify({"status": "ok"})
-
+    import threading
+    data = request.json or {}
+    game_date = data.get('date', None)
+    thread = threading.Thread(target=record_outcomes, args=(game_date,))
+    thread.daemon = True
+    thread.start()
+    return jsonify({"status": "ok", "message": "Outcomes recording started in background"})
 
 @app.route('/api/comparison/results', methods=['GET'])
 def comparison_results():
