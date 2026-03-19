@@ -85,54 +85,36 @@ def refresh():
     _cache["status"]          = "refreshing"
     _cache["refresh_started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Kick off SM fixtures refresh in background
-    def refresh_sm_fixtures():
+    def run_sm_refresh():
         try:
-            from .sm_fixtures import get_sm_fixtures
+            # 1. Refresh SM fixtures
             log.info("SM fixtures refresh starting...")
             fixtures = get_sm_fixtures(days=7)
             _cache["fixtures"] = fixtures
             _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info(f"SM fixtures refreshed: {sum(len(v) for v in fixtures.values())} total")
+
+            # 2. Score today
+            score_todays_fixtures()
+            build_comparison_for_date()
+
+            _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            _cache["status"]       = "ok"
+            log.info("SM refresh complete")
         except Exception as e:
-            log.error(f"SM fixtures refresh failed: {e}")
+            _cache["status"] = f"error: {str(e)}"
+            log.error(f"SM refresh failed: {e}")
 
-    fix_thread = threading.Thread(target=refresh_sm_fixtures)
-    fix_thread.daemon = True
-    fix_thread.start()
+    thread = threading.Thread(target=run_sm_refresh)
+    thread.daemon = True
+    thread.start()
 
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        (top25, by_league, fix, all_players_full, teams_list,
-         gs_top25, gs_all, gs_by_league,
-         tsoa_top25, tsoa_all, tsoa_by_league) = loop.run_until_complete(run_scraper())
-        loop.close()
-        _cache.update({
-            "top25":         top25,
-            "by_league":     by_league,
-            "last_updated":  datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "status":        "ok",
-            "all_players":   all_players_full,
-            "teams":         teams_list,
-            "gs_top25":      gs_top25,
-            "gs_all":        gs_all,
-            "gs_by_league":  gs_by_league,
-            "tsoa_top25":    tsoa_top25,
-            "tsoa_all":      tsoa_all,
-            "tsoa_by_league":tsoa_by_league,
-        })
-        return jsonify({
-            "success":      True,
-            "last_updated": _cache["last_updated"],
-            "top25":        top25,
-            "by_league":    by_league,
-            "version":      APP_VERSION,
-        })
-    except Exception as e:
-        _cache["status"] = f"error: {str(e)}"
-        log.error(f"Refresh failed: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify({
+        "success":      True,
+        "last_updated": _cache.get("last_updated", ""),
+        "version":      APP_VERSION,
+        "message":      "SM refresh started in background",
+    })
 
 
 # ── Match screen ──────────────────────────────────────────────────────────────
