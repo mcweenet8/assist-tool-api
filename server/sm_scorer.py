@@ -209,7 +209,7 @@ def calculate_tsoa(assist_index, goal_score, game_kp, game_sot):
     )
 
     raw = (assist_index * 0.50) + (goal_score * 0.50)
-    return round(raw * (0.7 + dual_threat * 0.3) * 1.75, 4)
+    return round(raw * (0.7 + dual_threat * 0.3) * 1.6, 4)
 
 
 # ── MAIN MATCH DAY FUNCTION ───────────────────────────────────────────────────
