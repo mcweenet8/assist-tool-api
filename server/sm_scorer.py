@@ -28,10 +28,8 @@ ASSIST_WEIGHTS = {
 }
 
 GOAL_WEIGHTS = {
-    "xgot_gap":  0.35,
-    "sot_per90": 0.25,
-    "xg_per90":  0.20,
-    "goals_p90": 0.20,
+    "sot_per90": 0.70,
+    "goals_p90": 0.30,
 }
 
 ASSIST_SCALE = 1.5
@@ -177,9 +175,7 @@ def calculate_goal_score(game_sot, minutes, xg_data, baseline):
     goals_per90 = baseline.get("goals_per90") or 0
 
     score = (
-        xgot_gap    * GOAL_WEIGHTS["xgot_gap"] +
         sot_per90   * GOAL_WEIGHTS["sot_per90"] +
-        xg_per90    * GOAL_WEIGHTS["xg_per90"] +
         goals_per90 * GOAL_WEIGHTS["goals_p90"]
     )
 
@@ -577,8 +573,7 @@ def get_season_scores():
             # DC Goal Score
             goal_score_raw = (
                 sot_per90   * GOAL_WEIGHTS["sot_per90"] +
-                goals_per90 * GOAL_WEIGHTS["goals_p90"] +
-                sot_ratio   * GOAL_WEIGHTS["xgot_gap"]
+                goals_per90 * GOAL_WEIGHTS["goals_p90"]
             )
             goal_score = round(goal_score_raw * GOAL_SCALE, 4)
 
