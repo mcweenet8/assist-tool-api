@@ -488,7 +488,20 @@ def get_season_scores():
                 "bc_per90":    avg(stats["bc_per90"]),
             }
 
-        # ── Step 2: Score each player ──────────────────────────────────────────
+        # ── Step 2: Dynamic threshold per league based on season progress ─────────
+        from collections import defaultdict as _dd2
+        league_max_mins = _dd2(int)
+        for _r in rows:
+            _lid = _r.get("league_id")
+            _m   = _r.get("minutes_played") or 0
+            if _lid and _m > league_max_mins[_lid]:
+                league_max_mins[_lid] = _m
+
+        def dynamic_threshold(_lid):
+            """15% of max minutes in league. Floor 90, cap 450. Auto-adjusts each season."""
+            return max(90, min(450, league_max_mins.get(_lid, 0) * 0.15))
+
+        # ── Step 3: Score each player ──────────────────────────────────────────
         players = []
 
         for row in rows:
@@ -496,8 +509,9 @@ def get_season_scores():
             minutes = row.get("minutes_played", 0)
             nineties = row.get("nineties", 0) or 0
 
-            if not minutes or minutes < 450 or nineties < 5:
+            if not minutes or minutes < dynamic_threshold(lid):
                 continue
+
 
             avgs = league_avgs.get(lid, {})
             if not avgs:
