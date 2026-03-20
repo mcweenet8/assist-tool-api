@@ -1,20 +1,6 @@
 """
 Deep Current Football — Sportmonks Fixtures
 server/sm_fixtures.py
-
-Replaces FotMob fixture scraping with Sportmonks API.
-Produces identical output format to fixtures.py so the app
-requires zero changes — just swap the data source.
-
-State IDs:
-  1 = Scheduled
-  2 = In Play (1st Half)
-  3 = Half Time
-  4 = In Play (2nd Half)
-  5 = Full Time
-  6 = Extra Time
-  7 = Penalties
-  9 = Abandoned
 """
 
 import os
@@ -24,8 +10,6 @@ from .sm_baseline import _sm_get
 
 log = logging.getLogger(__name__)
 
-# ── LEAGUE CONFIG ─────────────────────────────────────────────────────────────
-# Maps league name → {league_id, season_id}
 SM_LEAGUES = {
     "Premier League":  {"league_id": 8,    "season_id": 25583},
     "Championship":    {"league_id": 9,    "season_id": 25648},
@@ -37,39 +21,102 @@ SM_LEAGUES = {
     "A-League Men":    {"league_id": 1356, "season_id": 26529},
 }
 
-# State IDs that mean live
-LIVE_STATES     = {2, 3, 4, 6, 7}
-# State IDs that mean finished
-FINISHED_STATES = {5}
-# State IDs that mean scheduled
+LIVE_STATES      = {2, 3, 4, 6, 7}
+FINISHED_STATES  = {5}
 SCHEDULED_STATES = {1}
-# State IDs to skip
-SKIP_STATES     = {9}  # abandoned
+SKIP_STATES      = {9}
 
-# Fotmob-style team logo URL using Sportmonks CDN
+# State labels for display
+STATE_LABELS = {
+    2: "1H", 3: "HT", 4: "2H", 6: "ET", 7: "PEN"
+}
+
 def sm_team_logo(team_id):
     if not team_id:
         return None
-    return f"https://cdn.sportmonks.com/images/soccer/teams/{team_id}.png"
+    try:
+        n = int(team_id)
+        return f"https://cdn.sportmonks.com/images/soccer/teams/{n%32}/{n}.png"
+    except:
+        return None
+
+
+def _extract_score(scores):
+    """
+    Extract current score from SM scores array.
+    Looks for CURRENT description first, falls back to highest type_id.
+    Returns (home_goals, away_goals) or (None, None)
+    """
+    if not scores:
+        return None, None
+
+    if isinstance(scores, dict):
+        scores = scores.get("data", [])
+
+    # Find CURRENT scores
+    current = [s for s in scores if s.get("description") == "CURRENT"]
+    if not current:
+        # Fall back to 2ND_HALF or 1ST_HALF
+        for desc in ["2ND_HALF", "1ST_HALF"]:
+            current = [s for s in scores if s.get("description") == desc]
+            if current: break
+
+    if not current:
+        return None, None
+
+    home_goals = None
+    away_goals = None
+    for s in current:
+        score_data = s.get("score", {})
+        participant = score_data.get("participant", "")
+        goals = score_data.get("goals", 0)
+        if participant == "home":
+            home_goals = goals
+        elif participant == "away":
+            away_goals = goals
+
+    return home_goals, away_goals
+
+
+def _extract_minute(periods, state_id):
+    """Extract current minute from periods array."""
+    if not periods:
+        return None
+    if isinstance(periods, dict):
+        periods = periods.get("data", [])
+
+    # Find ticking period first
+    ticking = [p for p in periods if p.get("ticking")]
+    target = ticking[0] if ticking else (periods[-1] if periods else None)
+
+    if not target:
+        return None
+
+    minutes = target.get("minutes")
+    time_added = target.get("time_added", 0)
+
+    if state_id == 3:
+        return "HT"
+
+    if minutes is not None:
+        if time_added and int(time_added) > 0:
+            return f"{minutes}+{time_added}'"
+        return f"{minutes}'"
+
+    return STATE_LABELS.get(state_id)
 
 
 def _parse_fixture(fixture, league_name):
-    """
-    Parse a Sportmonks fixture dict into the app's expected format.
-    Matches the output of fixtures.py get_fixtures_for_dates().
-    """
-    state_id  = fixture.get("state_id")
+    """Parse a Sportmonks fixture into app format."""
+    state_id = fixture.get("state_id")
     if state_id in SKIP_STATES:
         return None
 
-    # Get participants (home/away teams)
     participants = fixture.get("participants", [])
     if isinstance(participants, dict):
         participants = participants.get("data", [])
 
-    home_team = None
-    away_team = None
-
+    home_team = away_team = None
     for p in participants:
         meta = p.get("meta", {})
         location = meta.get("location", "")
@@ -86,19 +133,15 @@ def _parse_fixture(fixture, league_name):
     home_name = home_team.get("name", "")
     away_name = away_team.get("name", "")
 
-    # Parse kickoff time
+    # Kickoff
     starting_at = fixture.get("starting_at", "")
     kickoff_utc = ""
-    date_str    = ""
     if starting_at:
         try:
-            # Sportmonks format: "2026-03-22 15:00:00"
             dt = datetime.strptime(starting_at, "%Y-%m-%d %H:%M:%S")
             kickoff_utc = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            date_str    = dt.strftime("%Y%m%d")
         except Exception:
             kickoff_utc = starting_at
-            date_str    = starting_at[:10].replace("-", "")
 
     is_live     = state_id in LIVE_STATES
     is_finished = state_id in FINISHED_STATES
@@ -106,22 +149,16 @@ def _parse_fixture(fixture, league_name):
     # Score
     score = None
     if is_live or is_finished:
-        home_score = fixture.get("home_score", "-")
-        away_score = fixture.get("away_score", "-")
-        if home_score is not None and away_score is not None:
-            score = f"{home_score} - {away_score}"
+        scores = fixture.get("scores", [])
+        home_goals, away_goals = _extract_score(scores)
+        if home_goals is not None and away_goals is not None:
+            score = f"{home_goals} - {away_goals}"
 
-    # Live minute
+    # Minute
     minute = None
     if is_live:
         periods = fixture.get("periods", [])
-        if isinstance(periods, dict):
-            periods = periods.get("data", [])
-        if periods:
-            last = periods[-1]
-            m = last.get("minutes", "") or last.get("time_added", "")
-            if m:
-                minute = str(m)
+        minute = _extract_minute(periods, state_id)
 
     return {
         "match_id":  str(fixture.get("id", "")),
@@ -132,7 +169,6 @@ def _parse_fixture(fixture, league_name):
         "home_logo": sm_team_logo(home_id),
         "away_logo": sm_team_logo(away_id),
         "kickoff":   kickoff_utc,
-        "date":      date_str,
         "live":      is_live,
         "finished":  is_finished,
         "score":     score,
@@ -142,61 +178,44 @@ def _parse_fixture(fixture, league_name):
 
 
 def get_sm_fixtures(days=7):
-    """
-    Fetch fixtures from Sportmonks for the next N days across all tracked leagues.
-    Returns dict matching FotMob fixtures format: {league_name: [fixture, ...]}
-
-    Drop-in replacement for get_fixtures_for_dates() in fixtures.py.
-    """
+    """Fetch fixtures for the next N days across all leagues."""
     fixtures_by_league = {ln: [] for ln in SM_LEAGUES}
 
     today = datetime.utcnow()
-    dates = [(today + timedelta(days=i)) for i in range(-2, days)]
-    date_pairs = [(d.strftime("%Y-%m-%d"), d.strftime("%Y%m%d")) for d in dates]
+    dates = [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(-2, days)]
 
     for league_name, config in SM_LEAGUES.items():
         league_id = config["league_id"]
-        log.info(f"Fetching SM fixtures: {league_name} (league {league_id})")
 
-        for iso_date, yyyymmdd in date_pairs:
+        for iso_date in dates:
             try:
                 resp = _sm_get(
                     endpoint=f"/fixtures/between/{iso_date}/{iso_date}",
                     filters=f"fixtureLeagues:{league_id}",
-                    include="participants",
+                    include="participants;scores;periods",
                 )
                 raw_fixtures = resp.get("data", [])
                 if isinstance(raw_fixtures, dict):
                     raw_fixtures = raw_fixtures.get("data", [])
 
-                matched = 0
                 for raw in raw_fixtures:
                     parsed = _parse_fixture(raw, league_name)
                     if parsed:
                         fixtures_by_league[league_name].append(parsed)
-                        matched += 1
-
-                if matched:
-                    log.info(f"  {iso_date}: {matched} fixtures ({league_name})")
 
             except Exception as e:
                 log.error(f"SM fixtures {league_name} {iso_date}: {e}")
 
-    # Sort each league by kickoff
     for ln in fixtures_by_league:
         fixtures_by_league[ln].sort(key=lambda x: x.get("kickoff", "") or "")
 
     total = sum(len(v) for v in fixtures_by_league.values())
-    log.info(f"SM fixtures total: {total} across {len(SM_LEAGUES)} leagues")
-
+    log.info(f"SM fixtures total: {total}")
     return fixtures_by_league
 
 
 def get_sm_live_fixtures():
-    """
-    Pull only live fixtures across all leagues.
-    Used for live match updates.
-    """
+    """Pull only live fixtures."""
     live = []
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -205,7 +224,7 @@ def get_sm_live_fixtures():
             resp = _sm_get(
                 endpoint=f"/fixtures/between/{today}/{today}",
                 filters=f"fixtureLeagues:{config['league_id']}",
-                include="participants",
+                include="participants;scores;periods",
             )
             raw_fixtures = resp.get("data", [])
             if isinstance(raw_fixtures, dict):
@@ -218,6 +237,6 @@ def get_sm_live_fixtures():
                         live.append(parsed)
 
         except Exception as e:
-            log.error(f"SM live fixtures {league_name}: {e}")
+            log.error(f"SM live {league_name}: {e}")
 
     return live
