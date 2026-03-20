@@ -430,13 +430,24 @@ def get_season_scores():
     Includes conversion rate modifier on assist index.
     """
     try:
-        res = supabase.table("player_baselines")\
-            .select("*")\
-            .execute()
+        # Fetch all rows with pagination — Supabase default limit is 1000
+        rows = []
+        page = 0
+        page_size = 1000
+        while True:
+            res = supabase.table("player_baselines")\
+                .select("*")\
+                .range(page * page_size, (page + 1) * page_size - 1)\
+                .execute()
+            batch = res.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            page += 1
 
-        rows = res.data or []
         if not rows:
             return {"players": [], "count": 0, "source": "sportmonks_season", "error": "No baselines found"}
+
 
         from collections import defaultdict
 
