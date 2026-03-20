@@ -173,6 +173,114 @@ def refresh():
     })
 
 
+@app.route('/api/sm/today-context', methods=['GET'])
+def sm_today_context():
+    """
+    Returns concession context for today's fixtures.
+    Maps player_id -> {concession_flag, concession_multiplier, opponent, fixture_id}
+    Used by Today tab to show matchup context on season players.
+    """
+    try:
+        from .positional_concessions import get_multipliers, apply_concession_multiplier, GRANULAR_POSITION_MAP
+        from supabase import create_client
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+
+        fixtures = _cache.get("fixtures", {})
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Find today's fixtures
+        today_fixtures = []
+        for league_name, matches in fixtures.items():
+            for m in matches:
+                ko = m.get("kickoff", "")
+                if not ko: continue
+                from datetime import datetime as dt
+                ko_local = dt.fromisoformat(ko.replace("Z", "+00:00"))
+                import pytz
+                local_date = ko_local.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+                if local_date == today or m.get("live"):
+                    today_fixtures.append(m)
+
+        if not today_fixtures:
+            return jsonify({"context": {}, "count": 0})
+
+        # Get season scores for position data
+        season_data = _cache.get("season_scores", {})
+        players = season_data.get("players", [])
+        player_map = {str(p["player_id"]): p for p in players}
+
+        # Get concession multipliers per league
+        LEAGUE_SEASON_MAP_LOCAL = {
+            8:25583, 9:25648, 564:25659, 384:25533,
+            82:25646, 301:25651, 779:26720, 1356:26529
+        }
+
+        context = {}
+
+        for fixture in today_fixtures:
+            home_id = fixture.get("home_id")
+            away_id = fixture.get("away_id")
+            fixture_id = fixture.get("match_id")
+            league_name = fixture.get("league", "")
+
+            # Find league_id
+            league_id = None
+            for lid, lname in {8:"Premier League",9:"Championship",564:"La Liga",384:"Serie A",82:"Bundesliga",301:"Ligue 1",779:"MLS",1356:"A-League Men"}.items():
+                if lname == league_name:
+                    league_id = lid
+                    break
+            if not league_id: continue
+
+            season_id = LEAGUE_SEASON_MAP_LOCAL.get(league_id)
+            if not season_id: continue
+
+            try:
+                mults = get_multipliers(fixture_id, season_id, league_id)
+            except:
+                continue
+
+            # For each team, apply opponent's concession multipliers to their players
+            for team_id, opponent_id in [(home_id, away_id), (away_id, home_id)]:
+                opponent_mults = mults.get(opponent_id, {})
+                if not opponent_mults: continue
+
+                # Find all players on this team
+                team_players = [p for p in players if str(p.get("team_id")) == str(team_id)]
+
+                for player in team_players:
+                    pid = str(player.get("player_id"))
+                    detailed_pos = player.get("detailed_position_id")
+                    pos_code = GRANULAR_POSITION_MAP.get(detailed_pos, (None, None))[0]
+                    if not pos_code: continue
+
+                    assist_index = player.get("assist_index") or 0
+                    goal_score = player.get("goal_score") or 0
+
+                    _, assist_mult, assist_flag = apply_concession_multiplier(
+                        assist_index, pos_code, opponent_mults, score_type="assist"
+                    )
+                    _, goal_mult, goal_flag = apply_concession_multiplier(
+                        goal_score, pos_code, opponent_mults, score_type="goal"
+                    )
+
+                    flag = assist_flag or goal_flag
+                    mult = round(max(assist_mult, goal_mult), 2)
+
+                    if flag:
+                        context[pid] = {
+                            "concession_flag":       flag,
+                            "concession_multiplier": mult,
+                            "opponent_id":           opponent_id,
+                            "fixture_id":            fixture_id,
+                        }
+
+        return jsonify({"context": context, "count": len(context)})
+
+    except Exception as e:
+        log.error(f"today-context error: {e}")
+        return jsonify({"context": {}, "count": 0, "error": str(e)})
+
+
 @app.route('/api/sm/season/refresh', methods=['POST'])
 def sm_season_refresh():
     """Force refresh season scores cache."""
