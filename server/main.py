@@ -24,6 +24,21 @@ from .pipeline_comparison import build_comparison_for_date, record_outcomes, get
 from .sm_fixtures import get_sm_fixtures
 
 
+# ── Boot — pre-warm season scores cache ──────────────────────────────────────
+
+def _prewarm_cache():
+    """Pre-calculate season scores on boot so first request is instant."""
+    try:
+        log.info("Pre-warming season scores cache...")
+        _cache["season_scores"] = get_season_scores()
+        _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        log.info(f"Season scores cached: {_cache['season_scores'].get('count', 0)} players")
+    except Exception as e:
+        log.error(f"Pre-warm error: {e}")
+
+threading.Thread(target=_prewarm_cache, daemon=True).start()
+
+
 # ── Health / version ──────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -135,6 +150,14 @@ def refresh():
             except Exception as e:
                 log.error(f"standings refresh error: {e}")
 
+            # Refresh season scores cache
+            try:
+                _cache["season_scores"] = get_season_scores()
+                _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                log.info("Season scores cache refreshed")
+            except Exception as e:
+                log.error(f"Season scores cache error: {e}")
+
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info("SM refresh complete")
         except Exception as e:
@@ -148,6 +171,17 @@ def refresh():
         "message":  "SM refresh started in background",
         "version":  APP_VERSION,
     })
+
+
+@app.route('/api/sm/season/refresh', methods=['POST'])
+def sm_season_refresh():
+    """Force refresh season scores cache."""
+    def run():
+        _cache["season_scores"] = get_season_scores()
+        _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        log.info("Season scores cache force refreshed")
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"status": "ok", "message": "Season scores refreshing"})
 
 
 # ── Standings (stub — returns empty until SM standings built) ─────────────────
@@ -170,7 +204,10 @@ def sm_data():
 
 @app.route('/api/sm/season', methods=['GET'])
 def sm_season():
-    return jsonify(get_season_scores())
+    if not _cache.get("season_scores"):
+        _cache["season_scores"] = get_season_scores()
+        _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return jsonify(_cache["season_scores"])
 
 
 @app.route('/api/sm/fixtures', methods=['GET'])
@@ -339,8 +376,8 @@ def sm_match(fixture_id):
         # Get season_id for this league
         season_id = LEAGUE_SEASON_MAP.get(league_id)
 
-        # Pull squad DC scores
-        season_data = get_season_scores()
+        # Pull squad DC scores from cache
+        season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
         home_players = sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
         away_players = sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
