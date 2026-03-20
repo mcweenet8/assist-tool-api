@@ -494,6 +494,44 @@ def sm_match(fixture_id):
         home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
         away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
 
+        # Pull lineups + formations from SM
+        lineup_data = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
+        try:
+            import requests as req
+            token = os.environ.get("SPORTMONKS_API_TOKEN")
+            base  = "https://api.sportmonks.com/v3/football"
+            r = req.get(f"{base}/fixtures/{fixture_id}",
+                params={"api_token": token, "include": "lineups;formations"},
+                timeout=15)
+            if r.status_code == 200:
+                fdata = r.json().get("data", {})
+                lineups = fdata.get("lineups", [])
+                if isinstance(lineups, dict): lineups = lineups.get("data", [])
+                formations = fdata.get("formations", [])
+                if isinstance(formations, dict): formations = formations.get("data", [])
+
+                starters = [p for p in lineups if p.get("type_id") == 11]
+                subs     = [p for p in lineups if p.get("type_id") == 12]
+
+                # Get season scores for DC score enrichment
+                all_players = season_data.get("players", [])
+                score_map = {str(p["player_id"]): p for p in all_players}
+
+                def enrich(player):
+                    pid = str(player.get("player_id"))
+                    dc = score_map.get(pid, {})
+                    return {**player, "assist_index": dc.get("assist_index"), "goal_score": dc.get("goal_score"), "tsoa_score": dc.get("tsoa_score"), "position_id": dc.get("position_id"), "detailed_position_id": dc.get("detailed_position_id")}
+
+                lineup_data = {
+                    "starters":        [enrich(p) for p in starters],
+                    "subs":            [enrich(p) for p in subs],
+                    "home_formation":  next((f["formation"] for f in formations if f.get("participant_id") == home_id), None),
+                    "away_formation":  next((f["formation"] for f in formations if f.get("participant_id") == away_id), None),
+                    "confirmed":       len(starters) >= 20,
+                }
+        except Exception as e:
+            log.error(f"lineup pull error {fixture_id}: {e}")
+
         return jsonify({
             "fixture_id":   fixture_id,
             "home":         home_name,
@@ -506,6 +544,7 @@ def sm_match(fixture_id):
             "total_away":   len(away_players),
             "home_ha":      home_ha,
             "away_ha":      away_ha,
+            "lineup":       lineup_data,
         })
 
     except Exception as e:
