@@ -21,14 +21,22 @@ SM_LEAGUES = {
     "A-League Men":    {"league_id": 1356, "season_id": 26529},
 }
 
-LIVE_STATES      = {2, 3, 4, 6, 7}
+LIVE_STATES      = {2, 3, 4, 6, 7, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}
 FINISHED_STATES  = {5}
 SCHEDULED_STATES = {1}
 SKIP_STATES      = {9}
 
-# State labels for display
+# State labels for display — covers both old and new SM state IDs
 STATE_LABELS = {
-    2: "1H", 3: "HT", 4: "2H", 6: "ET", 7: "PEN"
+    2:  "1H",  3:  "HT",  4:  "2H",  6:  "ET",  7:  "PEN",
+    11: "1H",  12: "HT",  13: "2H",  14: "ET",  15: "PEN",
+    20: "1H",  21: "HT",  22: "2H",  23: "ET",  24: "PEN",
+}
+
+# Developer name → live check (belt and suspenders)
+LIVE_DEVELOPER_NAMES = {
+    "INPLAY_1ST_HALF", "INPLAY_2ND_HALF", "HALF_TIME",
+    "INPLAY_ET", "INPLAY_ET_2ND_HALF", "PENALTY_SHOOTOUT",
 }
 
 def sm_team_logo(team_id):
@@ -143,8 +151,11 @@ def _parse_fixture(fixture, league_name):
         except Exception:
             kickoff_utc = starting_at
 
-    is_live     = state_id in LIVE_STATES
-    is_finished = state_id in FINISHED_STATES
+    # Check live via state_id OR developer_name
+    state_obj = fixture.get("state", {}) or {}
+    dev_name  = state_obj.get("developer_name", "")
+    is_live     = state_id in LIVE_STATES or dev_name in LIVE_DEVELOPER_NAMES
+    is_finished = state_id in FINISHED_STATES or dev_name == "FT"
 
     # Score
     score = None
@@ -192,7 +203,7 @@ def get_sm_fixtures(days=7):
                 resp = _sm_get(
                     endpoint=f"/fixtures/between/{iso_date}/{iso_date}",
                     filters=f"fixtureLeagues:{league_id}",
-                    include="participants;scores;periods",
+                    include="participants;scores;periods;state",
                 )
                 raw_fixtures = resp.get("data", [])
                 if isinstance(raw_fixtures, dict):
@@ -224,7 +235,7 @@ def get_sm_live_fixtures():
             resp = _sm_get(
                 endpoint=f"/fixtures/between/{today}/{today}",
                 filters=f"fixtureLeagues:{config['league_id']}",
-                include="participants;scores;periods",
+                include="participants;scores;periods;state",
             )
             raw_fixtures = resp.get("data", [])
             if isinstance(raw_fixtures, dict):
