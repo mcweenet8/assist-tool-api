@@ -20,10 +20,11 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ── SCORING WEIGHTS ───────────────────────────────────────────────────────────
 
 ASSIST_WEIGHTS = {
-    "kp_ratio":       0.45,
-    "cross_ratio":    0.25,
+    "kp_ratio":       0.40,
+    "cross_ratio":    0.20,
     "bc_ratio":       0.20,
     "pass_acc_ratio": 0.10,
+    "cca_ratio":      0.10,
 }
 
 GOAL_WEIGHTS = {
@@ -449,12 +450,28 @@ def get_season_scores():
             return {"players": [], "count": 0, "source": "sportmonks_season", "error": "No baselines found"}
 
 
+        # Fetch CCA data with pagination
+        cca_rows = []
+        cca_page = 0
+        while True:
+            cca_res = supabase.table("player_cca_season")\
+                .select("player_id,cca_per_fixture,league_id")\
+                .range(cca_page * page_size, (cca_page + 1) * page_size - 1)\
+                .execute()
+            cca_batch = cca_res.data or []
+            cca_rows.extend(cca_batch)
+            if len(cca_batch) < page_size:
+                break
+            cca_page += 1
+        cca_map = {row["player_id"]: row.get("cca_per_fixture", 0) for row in cca_rows}
+
+
         from collections import defaultdict
 
         # ── Step 1: League averages ────────────────────────────────────────────
         league_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
-            "goals_per90": [], "pass_acc": [], "conversion": [], "bc_per90": []
+            "goals_per90": [], "pass_acc": [], "conversion": [], "bc_per90": [], "cca": []
         })
 
         for row in rows:
@@ -466,6 +483,8 @@ def get_season_scores():
             if row.get("goals_per90"):            league_stats[lid]["goals_per90"].append(row["goals_per90"])
             if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
             if row.get("big_chances_per90"):      league_stats[lid]["bc_per90"].append(row["big_chances_per90"])
+            cca_val = cca_map.get(row.get("player_id"), 0)
+            if cca_val > 0:                        league_stats[lid]["cca"].append(cca_val)
             # Conversion rate for league average
             # Only include players with 900+ minutes (10 games) and at least 1 assist
             kp_total = row.get("key_passes_total") or 0
@@ -486,6 +505,7 @@ def get_season_scores():
                 "pass_acc":    avg(stats["pass_acc"]),
                 "conversion":  avg(stats["conversion"]),
                 "bc_per90":    avg(stats["bc_per90"]),
+                "cca":         avg(stats["cca"]),
             }
 
         # ── Step 2: Dynamic threshold per league based on season progress ─────────
@@ -529,13 +549,16 @@ def get_season_scores():
             sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
             bc_per90    = row.get("big_chances_per90") or 0
             bc_ratio    = bc_per90    / avgs.get("bc_per90",    0.001)
+            cca_val     = cca_map.get(row.get("player_id"), 0) or 0
+            cca_ratio   = cca_val     / avgs.get("cca",          0.001)
 
             # DC Assist Index with conversion rate modifier
             assist_index_raw = (
                 kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
                 cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
                 bc_ratio    * ASSIST_WEIGHTS["bc_ratio"] +
-                pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"]
+                pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"] +
+                cca_ratio   * ASSIST_WEIGHTS["cca_ratio"]
             )
             conv_mod = _conversion_modifier(
                 row.get("assists_total") or 0,
@@ -580,6 +603,8 @@ def get_season_scores():
                 "bc_ratio":             round(bc_ratio, 3),
                 "pass_acc_ratio":       round(pa_ratio, 3),
                 "conversion_modifier":  conv_mod,
+                "cca_per_fixture":      round(cca_val, 4),
+                "cca_ratio":            round(cca_ratio, 3),
                 "assist_index":         assist_index,
                 "goal_score":           goal_score,
                 "tsoa_score":           tsoa,
