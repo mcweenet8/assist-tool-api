@@ -518,8 +518,15 @@ def get_season_scores():
                 league_max_mins[_lid] = _m
 
         def dynamic_threshold(_lid):
-            """15% of max minutes in league. Floor 90, cap 450. Auto-adjusts each season."""
-            return max(90, min(450, league_max_mins.get(_lid, 0) * 0.15))
+            """
+            15% of max minutes in league.
+            European leagues: floor 450, cap 450.
+            MLS/A-League: floor 90, cap 450 (shorter/newer seasons).
+            Auto-adjusts each season.
+            """
+            raw = league_max_mins.get(_lid, 0) * 0.15
+            floor = 90 if _lid in (779, 1356) else 450
+            return max(floor, min(450, raw))
 
         # ── Step 3: Score each player ──────────────────────────────────────────
         players = []
