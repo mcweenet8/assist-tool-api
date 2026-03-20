@@ -620,6 +620,20 @@ def sm_standings():
     return jsonify({"standings": {}, "last_updated": "", "source": "sportmonks", "loading": True})
 
 
+@app.route('/api/sm/team-stats/<int:team_id>', methods=['GET'])
+def sm_team_stats(team_id):
+    """Return home/away stats for a team. Used by TeamProfile modal."""
+    try:
+        season_id = request.args.get('season_id', type=int)
+        if not season_id:
+            return jsonify({"error": "season_id required"}), 400
+        stats = _get_team_ha_stats(team_id, season_id)
+        return jsonify({"stats": stats, "team_id": team_id, "season_id": season_id})
+    except Exception as e:
+        log.error(f"team_stats {team_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Baseline / concessions bootstrap ─────────────────────────────────────────
 
 @app.route('/api/baseline/bootstrap', methods=['POST'])
