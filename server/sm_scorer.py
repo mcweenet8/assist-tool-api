@@ -496,7 +496,7 @@ def get_season_scores():
             minutes = row.get("minutes_played", 0)
             nineties = row.get("nineties", 0) or 0
 
-            if not minutes or minutes < 180 or nineties < 2:
+            if not minutes or minutes < 450 or nineties < 5:
                 continue
 
             avgs = league_avgs.get(lid, {})
@@ -556,6 +556,7 @@ def get_season_scores():
                 "pass_accuracy":        pass_acc,
                 "assists_total":        row.get("assists_total") or 0,
                 "big_chances_created":  row.get("big_chances_created") or 0,
+                "big_chances_per90":   row.get("big_chances_per90") or 0,
                 "appearances":          row.get("appearances") or 0,
                 "league_avg_kp":        round(avgs.get("kp_per90", 0), 3),
                 "league_avg_cross":     round(avgs.get("cross_per90", 0), 3),
