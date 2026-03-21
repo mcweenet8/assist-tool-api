@@ -252,6 +252,10 @@ def process_fixture(fixture_id, season_id, league_id):
     events = fixture.get("events", [])
     if isinstance(events, dict): events = events.get("data", [])
 
+    # Both teams always get games_played incremented regardless of goals
+    if home_team_id: games_teams.add(home_team_id)
+    if away_team_id: games_teams.add(away_team_id)
+
     for event in events:
         if event.get("type_id") != 14:
             continue
@@ -264,7 +268,6 @@ def process_fixture(fixture_id, season_id, league_id):
         if not opposing_team:
             continue
 
-        games_teams.add(opposing_team)
         opp_is_home = is_home(opposing_team)
         h = 1 if opp_is_home else 0
         a = 0 if opp_is_home else 1
