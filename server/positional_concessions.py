@@ -530,8 +530,14 @@ def get_multipliers(fixture_id, season_id, league_id):
             assist_mult = apg  / avg_a
             bc_mult     = bcpg / avg_b
 
+            # Absolute thresholds by position
+            ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
+            ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
+            abs_goal_flag   = gpg >= ABS_GOAL_THRESH.get(bp, 99)
+            abs_assist_flag = apg >= ABS_ASSIST_THRESH.get(bp, 99)
+
             flag = None
-            if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH:
+            if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
                 flag = "HIGH"
             elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
                 flag = "MEDIUM"
@@ -567,8 +573,15 @@ def get_multipliers(fixture_id, season_id, league_id):
             assist_mult = apg  / max(avg_a, 0.001)
             bc_mult     = bcpg / max(avg_b, 0.001)
 
+            # Use broad position for absolute thresholds
+            broad_for_pc = BROAD_MAP.get(pc, "MID")
+            ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
+            ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
+            abs_goal_flag   = gpg >= ABS_GOAL_THRESH.get(broad_for_pc, 99)
+            abs_assist_flag = apg >= ABS_ASSIST_THRESH.get(broad_for_pc, 99)
+
             flag = None
-            if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH:
+            if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
                 flag = "HIGH"
             elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
                 flag = "MEDIUM"
