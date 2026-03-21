@@ -21,10 +21,10 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 ASSIST_WEIGHTS = {
     "kp_ratio":       0.40,
-    "cross_ratio":    0.20,
-    "bc_ratio":       0.20,
+    "bc_ratio":       0.25,
+    "cca_ratio":      0.15,
+    "cross_ratio":    0.10,
     "pass_acc_ratio": 0.10,
-    "cca_ratio":      0.10,
 }
 
 GOAL_WEIGHTS = {
@@ -63,7 +63,7 @@ def _conversion_modifier(assists_total, key_passes_total, league_avg_conversion)
     Players who create a lot but rarely assist get dampened.
     """
     if not key_passes_total or key_passes_total < 10:
-        return 1.0  # Not enough data — no modifier
+        return 1.0
     if not assists_total:
         assists_total = 0
     conversion_rate = assists_total / key_passes_total
@@ -427,7 +427,7 @@ def get_season_scores():
     Includes conversion rate modifier on assist index.
     """
     try:
-        # Fetch all rows with pagination — Supabase default limit is 1000
+        # Fetch all rows with pagination
         rows = []
         page = 0
         page_size = 1000
@@ -445,7 +445,6 @@ def get_season_scores():
         if not rows:
             return {"players": [], "count": 0, "source": "sportmonks_season", "error": "No baselines found"}
 
-
         # Fetch CCA data with pagination
         cca_rows = []
         cca_page = 0
@@ -461,10 +460,9 @@ def get_season_scores():
             cca_page += 1
         cca_map = {row["player_id"]: row.get("cca_per_fixture", 0) for row in cca_rows}
 
-
         from collections import defaultdict
 
-        # ── Step 1: League averages ────────────────────────────────────────────
+        # ── Step 1: League averages ───────────────────────────────────────────
         league_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
             "goals_per90": [], "pass_acc": [], "conversion": [], "bc_per90": [], "cca": []
@@ -481,8 +479,6 @@ def get_season_scores():
             if row.get("big_chances_per90"):      league_stats[lid]["bc_per90"].append(row["big_chances_per90"])
             cca_val = cca_map.get(row.get("player_id"), 0)
             if cca_val > 0:                        league_stats[lid]["cca"].append(cca_val)
-            # Conversion rate for league average
-            # Only include players with 900+ minutes (10 games) and at least 1 assist
             kp_total = row.get("key_passes_total") or 0
             a_total  = row.get("assists_total") or 0
             mins     = row.get("minutes_played") or 0
@@ -504,7 +500,7 @@ def get_season_scores():
                 "cca":         avg(stats["cca"]),
             }
 
-        # ── Step 2: Dynamic threshold per league based on season progress ─────────
+        # ── Step 2: Dynamic threshold per league ─────────────────────────────
         from collections import defaultdict as _dd2
         league_max_mins = _dd2(int)
         for _r in rows:
@@ -514,17 +510,11 @@ def get_season_scores():
                 league_max_mins[_lid] = _m
 
         def dynamic_threshold(_lid):
-            """
-            15% of max minutes in league.
-            European leagues: floor 450, cap 450.
-            MLS/A-League: floor 90, cap 450 (shorter/newer seasons).
-            Auto-adjusts each season.
-            """
             raw = league_max_mins.get(_lid, 0) * 0.15
             floor = 90 if _lid in (779, 1356) else 450
             return max(floor, min(450, raw))
 
-        # ── Step 3: Score each player ──────────────────────────────────────────
+        # ── Step 3: Score each player ─────────────────────────────────────────
         players = []
 
         for row in rows:
@@ -534,7 +524,6 @@ def get_season_scores():
 
             if not minutes or minutes < dynamic_threshold(lid):
                 continue
-
 
             avgs = league_avgs.get(lid, {})
             if not avgs:
@@ -595,7 +584,7 @@ def get_season_scores():
                 "pass_accuracy":        pass_acc,
                 "assists_total":        row.get("assists_total") or 0,
                 "big_chances_created":  row.get("big_chances_created") or 0,
-                "big_chances_per90":   row.get("big_chances_per90") or 0,
+                "big_chances_per90":    row.get("big_chances_per90") or 0,
                 "appearances":          row.get("appearances") or 0,
                 "league_avg_kp":        round(avgs.get("kp_per90", 0), 3),
                 "league_avg_cross":     round(avgs.get("cross_per90", 0), 3),
