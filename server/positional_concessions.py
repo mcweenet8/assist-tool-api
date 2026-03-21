@@ -519,24 +519,16 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_broad.get(bp, {})
             gp  = row["games_played"] or 1
 
-            if team_is_home:
-                gpg  = row.get("goals_conceded_home", 0)   / gp
-                apg  = row.get("assists_conceded_home", 0) / gp
-                bcpg = row.get("bc_conceded_home", 0)      / gp
-                avg_g = avg.get("avg_goals_home",   avg.get("avg_goals_per_game",   0.001))
-                avg_a = avg.get("avg_assists_home", avg.get("avg_assists_per_game", 0.001))
-                avg_b = avg.get("avg_bc_home",      avg.get("avg_bc_per_game",      0.001))
-            else:
-                gpg  = row.get("goals_conceded_away", 0)   / gp
-                apg  = row.get("assists_conceded_away", 0) / gp
-                bcpg = row.get("bc_conceded_away", 0)      / gp
-                avg_g = avg.get("avg_goals_away",   avg.get("avg_goals_per_game",   0.001))
-                avg_a = avg.get("avg_assists_away", avg.get("avg_assists_per_game", 0.001))
-                avg_b = avg.get("avg_bc_away",      avg.get("avg_bc_per_game",      0.001))
+            gpg  = row["goals_conceded"]     / gp
+            apg  = row["assists_conceded"]   / gp
+            bcpg = row.get("bc_conceded", 0) / gp
+            avg_g = avg.get("avg_goals_per_game",   0.001) or 0.001
+            avg_a = avg.get("avg_assists_per_game", 0.001) or 0.001
+            avg_b = avg.get("avg_bc_per_game",      0.001) or 0.001
 
-            goal_mult   = gpg  / max(avg_g, 0.001)
-            assist_mult = apg  / max(avg_a, 0.001)
-            bc_mult     = bcpg / max(avg_b, 0.001)
+            goal_mult   = gpg  / avg_g
+            assist_mult = apg  / avg_a
+            bc_mult     = bcpg / avg_b
 
             flag = None
             if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH:
@@ -564,20 +556,12 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_granular.get(pc, {})
             gp  = row["games_played"] or 1
 
-            if team_is_home:
-                gpg  = row.get("goals_conceded_home", 0)   / gp
-                apg  = row.get("assists_conceded_home", 0) / gp
-                bcpg = row.get("bc_conceded_home", 0)      / gp
-                avg_g = avg.get("avg_goals_home",   avg.get("avg_goals_per_game",   0.001))
-                avg_a = avg.get("avg_assists_home", avg.get("avg_assists_per_game", 0.001))
-                avg_b = avg.get("avg_bc_home",      avg.get("avg_bc_per_game",      0.001))
-            else:
-                gpg  = row.get("goals_conceded_away", 0)   / gp
-                apg  = row.get("assists_conceded_away", 0) / gp
-                bcpg = row.get("bc_conceded_away", 0)      / gp
-                avg_g = avg.get("avg_goals_away",   avg.get("avg_goals_per_game",   0.001))
-                avg_a = avg.get("avg_assists_away", avg.get("avg_assists_per_game", 0.001))
-                avg_b = avg.get("avg_bc_away",      avg.get("avg_bc_per_game",      0.001))
+            gpg  = row["goals_conceded"]              / gp
+            apg  = row["assists_conceded"]            / gp
+            bcpg = row.get("bc_conceded", 0)          / gp
+            avg_g = avg.get("avg_goals_per_game",   0.001) or 0.001
+            avg_a = avg.get("avg_assists_per_game", 0.001) or 0.001
+            avg_b = avg.get("avg_bc_per_game",      0.001) or 0.001
 
             goal_mult   = gpg  / max(avg_g, 0.001)
             assist_mult = apg  / max(avg_a, 0.001)
