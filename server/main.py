@@ -164,91 +164,158 @@ def refresh():
 @app.route('/api/sm/today-context', methods=['GET'])
 def sm_today_context():
     try:
-        from .positional_concessions import get_multipliers, apply_concession_multiplier, GRANULAR_POSITION_MAP
+        from .positional_concessions import apply_concession_multiplier, GRANULAR_POSITION_MAP, BROAD_MAP
         from supabase import create_client
+        import pytz
+
         sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
 
-        fixtures = _cache.get("fixtures", {})
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        today_fixtures = []
-        for league_name, matches in fixtures.items():
-            for m in matches:
-                ko = m.get("kickoff", "")
-                if not ko: continue
-                from datetime import datetime as dt
-                ko_local = dt.fromisoformat(ko.replace("Z", "+00:00"))
-                import pytz
-                local_date = ko_local.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
-                if local_date == today or m.get("live"):
-                    today_fixtures.append(m)
-
-        if not today_fixtures:
-            return jsonify({"context": {}, "count": 0})
-
+        fixtures    = _cache.get("fixtures", {})
         season_data = _cache.get("season_scores", {})
-        players = season_data.get("players", [])
+        players     = season_data.get("players", [])
+        today       = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
 
         LEAGUE_SEASON_MAP_LOCAL = {
             8:25583, 9:25648, 564:25659, 384:25533,
             82:25646, 301:25651, 779:26720, 1356:26529
         }
+        LEAGUE_NAME_MAP = {
+            "Premier League":8,"Championship":9,"La Liga":564,"Serie A":384,
+            "Bundesliga":82,"Ligue 1":301,"MLS":779,"A-League Men":1356
+        }
+
+        # Absolute thresholds (same as positional_concessions.py)
+        ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
+        ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
+        THRESHOLD_HIGH    = 2.0
+        THRESHOLD_MEDIUM  = 1.5
+
+        BROAD_POSITION_MAP = {24:"GK", 25:"DEF", 26:"MID", 27:"FWD"}
+
+        # Find today's fixtures from cache
+        today_fixtures = []
+        for league_name, matches in fixtures.items():
+            league_id = LEAGUE_NAME_MAP.get(league_name)
+            if not league_id: continue
+            season_id = LEAGUE_SEASON_MAP_LOCAL.get(league_id)
+            if not season_id: continue
+            for m in matches:
+                ko = m.get("kickoff", "")
+                if not ko: continue
+                try:
+                    ko_dt      = datetime.fromisoformat(ko.replace("Z", "+00:00"))
+                    local_date = ko_dt.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+                except:
+                    local_date = ko[:10]
+                if local_date == today or m.get("live"):
+                    today_fixtures.append({
+                        **m,
+                        "league_id": league_id,
+                        "season_id": season_id,
+                    })
+
+        if not today_fixtures:
+            return jsonify({"context": {}, "count": 0})
+
+        # Get all relevant league averages in one query
+        season_ids = list({f["season_id"] for f in today_fixtures})
+        avg_rows   = sb.table("positional_concessions_league_avg")\
+            .select("*").eq("granularity", "broad")\
+            .in_("season_id", season_ids).execute().data
+
+        # Build avg lookup: season_id -> broad_position -> row
+        avg_map = {}
+        for row in avg_rows:
+            sid = row["season_id"]
+            if sid not in avg_map: avg_map[sid] = {}
+            avg_map[sid][row["broad_position"]] = row
+
+        # Get all team concession data in one query per season
+        team_ids_by_season = {}
+        for f in today_fixtures:
+            sid = f["season_id"]
+            if sid not in team_ids_by_season: team_ids_by_season[sid] = set()
+            if f.get("home_id"): team_ids_by_season[sid].add(int(f["home_id"]))
+            if f.get("away_id"): team_ids_by_season[sid].add(int(f["away_id"]))
+
+        broad_map = {}  # (team_id, season_id, broad_pos) -> row
+        for sid, tids in team_ids_by_season.items():
+            rows = sb.table("positional_concessions_broad")\
+                .select("*").eq("season_id", sid)\
+                .in_("team_id", list(tids)).execute().data
+            for row in rows:
+                broad_map[(row["team_id"], sid, row["broad_position"])] = row
+
+        # Build multipliers per team per season inline
+        def get_team_multipliers(team_id, season_id):
+            result = {"broad": {}}
+            avgs   = avg_map.get(season_id, {})
+            for bp in ["GK", "DEF", "MID", "FWD"]:
+                row = broad_map.get((int(team_id), season_id, bp))
+                if not row: continue
+                avg = avgs.get(bp, {})
+                gp  = row["games_played"] or 1
+                gpg = row["goals_conceded"]   / gp
+                apg = row["assists_conceded"] / gp
+                avg_g = avg.get("avg_goals_per_game",   0.001) or 0.001
+                avg_a = avg.get("avg_assists_per_game", 0.001) or 0.001
+
+                goal_mult   = gpg / avg_g
+                assist_mult = apg / avg_a
+
+                abs_goal   = gpg >= ABS_GOAL_THRESH.get(bp, 99)
+                abs_assist = apg >= ABS_ASSIST_THRESH.get(bp, 99)
+
+                flag = None
+                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal or abs_assist:
+                    flag = "HIGH"
+                elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
+                    flag = "MEDIUM"
+
+                result["broad"][bp] = {
+                    "goal_multiplier":   round(goal_mult, 2),
+                    "assist_multiplier": round(assist_mult, 2),
+                    "flag":              flag,
+                }
+            return result
 
         context = {}
 
         for fixture in today_fixtures:
-            home_id     = fixture.get("home_id")
-            away_id     = fixture.get("away_id")
-            fixture_id  = fixture.get("match_id")
-            league_name = fixture.get("league", "")
+            home_id    = fixture.get("home_id")
+            away_id    = fixture.get("away_id")
+            fixture_id = fixture.get("match_id")
+            season_id  = fixture["season_id"]
 
-            league_id = None
-            for lid, lname in {8:"Premier League",9:"Championship",564:"La Liga",384:"Serie A",82:"Bundesliga",301:"Ligue 1",779:"MLS",1356:"A-League Men"}.items():
-                if lname == league_name:
-                    league_id = lid
-                    break
-            if not league_id: continue
-
-            season_id = LEAGUE_SEASON_MAP_LOCAL.get(league_id)
-            if not season_id: continue
-
-            try:
-                mults = get_multipliers(fixture_id, season_id, league_id)
-            except:
-                continue
+            if not home_id or not away_id: continue
 
             for team_id, opponent_id in [(home_id, away_id), (away_id, home_id)]:
-                opponent_mults = mults.get(opponent_id, {})
-                if not opponent_mults: continue
+                opponent_mults = get_team_multipliers(opponent_id, season_id)
+                if not opponent_mults["broad"]: continue
 
                 team_players = [p for p in players if str(p.get("team_id")) == str(team_id)]
 
                 for player in team_players:
-                    pid = str(player.get("player_id"))
+                    pid          = str(player.get("player_id"))
                     detailed_pos = player.get("detailed_position_id")
-                    pos_code = GRANULAR_POSITION_MAP.get(detailed_pos, (None, None))[0]
+                    pos_code     = GRANULAR_POSITION_MAP.get(detailed_pos, (None, None))[0]
                     if not pos_code: continue
 
-                    assist_index = player.get("assist_index") or 0
-                    goal_score   = player.get("goal_score") or 0
+                    broad = BROAD_MAP.get(pos_code, "MID")
+                    broad_data = opponent_mults["broad"].get(broad, {})
+                    flag = broad_data.get("flag")
+                    if not flag: continue
 
-                    _, assist_mult, assist_flag = apply_concession_multiplier(
-                        assist_index, pos_code, opponent_mults, score_type="assist"
-                    )
-                    _, goal_mult, goal_flag = apply_concession_multiplier(
-                        goal_score, pos_code, opponent_mults, score_type="goal"
-                    )
+                    assist_mult = broad_data.get("assist_multiplier", 1.0)
+                    goal_mult   = broad_data.get("goal_multiplier", 1.0)
+                    mult        = round(max(assist_mult, goal_mult), 2)
 
-                    flag = assist_flag or goal_flag
-                    mult = round(max(assist_mult, goal_mult), 2)
-
-                    if flag:
-                        context[pid] = {
-                            "concession_flag":       flag,
-                            "concession_multiplier": mult,
-                            "opponent_id":           opponent_id,
-                            "fixture_id":            fixture_id,
-                        }
+                    context[pid] = {
+                        "concession_flag":       flag,
+                        "concession_multiplier": mult,
+                        "opponent_id":           opponent_id,
+                        "fixture_id":            fixture_id,
+                    }
 
         return jsonify({"context": context, "count": len(context)})
 
