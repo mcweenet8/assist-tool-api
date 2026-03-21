@@ -214,6 +214,8 @@ def sm_today_context():
                         "season_id": season_id,
                     })
 
+        log.info(f"today-context: today={today} cache_leagues={list(fixtures.keys())} today_fixtures={len(today_fixtures)}")
+
         if not today_fixtures:
             return jsonify({"context": {}, "count": 0})
 
