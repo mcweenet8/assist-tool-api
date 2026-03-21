@@ -4,11 +4,14 @@ server/positional_concessions.py
 
 Tracks goals, assists, and big chances conceded by position.
 Includes home/away splits for more accurate matchup multipliers.
+
+v2 — Batched Supabase writes (single upsert per team/position per fixture)
 """
 
 import os
 import requests
 from datetime import datetime
+from collections import defaultdict
 from supabase import create_client
 
 SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN")
@@ -74,100 +77,108 @@ def _mark_processed(fixture_id):
         .insert({"fixture_id": fixture_id}).execute()
 
 
-def _upsert_broad(team_id, season_id, league_id, broad_pos,
-                  goals=0, goals_home=0, goals_away=0,
-                  assists=0, assists_home=0, assists_away=0,
-                  bc=0, bc_home=0, bc_away=0, games=0):
-    existing = supabase.table("positional_concessions_broad")\
-        .select("*").eq("team_id", team_id).eq("season_id", season_id)\
-        .eq("broad_position", broad_pos).execute()
+def _flush_broad(team_id, season_id, league_id, accum):
+    """
+    Flush accumulated broad position data for one team in one fixture.
+    accum = { broad_position: { goals, goals_home, goals_away, assists, ... } }
+    Single GET + upsert per position — 4 calls max per team instead of one per event.
+    """
+    for broad_pos, delta in accum.items():
+        existing = supabase.table("positional_concessions_broad")\
+            .select("*")\
+            .eq("team_id", team_id)\
+            .eq("season_id", season_id)\
+            .eq("broad_position", broad_pos)\
+            .execute()
 
-    if existing.data:
-        row = existing.data[0]
-        supabase.table("positional_concessions_broad").update({
-            "goals_conceded":        row["goals_conceded"]        + goals,
-            "goals_conceded_home":   row.get("goals_conceded_home",0)   + goals_home,
-            "goals_conceded_away":   row.get("goals_conceded_away",0)   + goals_away,
-            "assists_conceded":      row["assists_conceded"]      + assists,
-            "assists_conceded_home": row.get("assists_conceded_home",0) + assists_home,
-            "assists_conceded_away": row.get("assists_conceded_away",0) + assists_away,
-            "bc_conceded":           row.get("bc_conceded",0)           + bc,
-            "bc_conceded_home":      row.get("bc_conceded_home",0)      + bc_home,
-            "bc_conceded_away":      row.get("bc_conceded_away",0)      + bc_away,
-            "games_played":          row["games_played"]          + games,
-            "last_updated":          datetime.utcnow().isoformat()
-        }).eq("id", row["id"]).execute()
-    else:
-        supabase.table("positional_concessions_broad").insert({
-            "team_id":               team_id,
-            "season_id":             season_id,
-            "league_id":             league_id,
-            "broad_position":        broad_pos,
-            "goals_conceded":        goals,
-            "goals_conceded_home":   goals_home,
-            "goals_conceded_away":   goals_away,
-            "assists_conceded":      assists,
-            "assists_conceded_home": assists_home,
-            "assists_conceded_away": assists_away,
-            "bc_conceded":           bc,
-            "bc_conceded_home":      bc_home,
-            "bc_conceded_away":      bc_away,
-            "games_played":          games,
-        }).execute()
+        if existing.data:
+            row = existing.data[0]
+            supabase.table("positional_concessions_broad").update({
+                "goals_conceded":        row["goals_conceded"]                  + delta.get("goals", 0),
+                "goals_conceded_home":   row.get("goals_conceded_home", 0)      + delta.get("goals_home", 0),
+                "goals_conceded_away":   row.get("goals_conceded_away", 0)      + delta.get("goals_away", 0),
+                "assists_conceded":      row["assists_conceded"]                + delta.get("assists", 0),
+                "assists_conceded_home": row.get("assists_conceded_home", 0)    + delta.get("assists_home", 0),
+                "assists_conceded_away": row.get("assists_conceded_away", 0)    + delta.get("assists_away", 0),
+                "bc_conceded":           row.get("bc_conceded", 0)              + delta.get("bc", 0),
+                "bc_conceded_home":      row.get("bc_conceded_home", 0)         + delta.get("bc_home", 0),
+                "bc_conceded_away":      row.get("bc_conceded_away", 0)         + delta.get("bc_away", 0),
+                "games_played":          row["games_played"]                    + delta.get("games", 0),
+                "last_updated":          datetime.utcnow().isoformat()
+            }).eq("id", row["id"]).execute()
+        else:
+            supabase.table("positional_concessions_broad").insert({
+                "team_id":               team_id,
+                "season_id":             season_id,
+                "league_id":             league_id,
+                "broad_position":        broad_pos,
+                "goals_conceded":        delta.get("goals", 0),
+                "goals_conceded_home":   delta.get("goals_home", 0),
+                "goals_conceded_away":   delta.get("goals_away", 0),
+                "assists_conceded":      delta.get("assists", 0),
+                "assists_conceded_home": delta.get("assists_home", 0),
+                "assists_conceded_away": delta.get("assists_away", 0),
+                "bc_conceded":           delta.get("bc", 0),
+                "bc_conceded_home":      delta.get("bc_home", 0),
+                "bc_conceded_away":      delta.get("bc_away", 0),
+                "games_played":          delta.get("games", 0),
+            }).execute()
 
 
-def _upsert_granular(team_id, season_id, league_id, position_id, position_code, broad_pos,
-                     goals=0, goals_home=0, goals_away=0,
-                     assists=0, assists_home=0, assists_away=0,
-                     bc=0, bc_home=0, bc_away=0, games=0):
-    existing = supabase.table("positional_concessions_granular")\
-        .select("*").eq("team_id", team_id).eq("season_id", season_id)\
-        .eq("position_id", position_id).execute()
+def _flush_granular(team_id, season_id, league_id, accum):
+    """
+    Flush accumulated granular position data for one team in one fixture.
+    accum = { position_id: { position_code, broad_pos, goals, ... } }
+    """
+    for position_id, delta in accum.items():
+        existing = supabase.table("positional_concessions_granular")\
+            .select("*")\
+            .eq("team_id", team_id)\
+            .eq("season_id", season_id)\
+            .eq("position_id", position_id)\
+            .execute()
 
-    if existing.data:
-        row = existing.data[0]
-        supabase.table("positional_concessions_granular").update({
-            "goals_conceded":        row["goals_conceded"]        + goals,
-            "goals_conceded_home":   row.get("goals_conceded_home",0)   + goals_home,
-            "goals_conceded_away":   row.get("goals_conceded_away",0)   + goals_away,
-            "assists_conceded":      row["assists_conceded"]      + assists,
-            "assists_conceded_home": row.get("assists_conceded_home",0) + assists_home,
-            "assists_conceded_away": row.get("assists_conceded_away",0) + assists_away,
-            "bc_conceded":           row.get("bc_conceded",0)           + bc,
-            "bc_conceded_home":      row.get("bc_conceded_home",0)      + bc_home,
-            "bc_conceded_away":      row.get("bc_conceded_away",0)      + bc_away,
-            "games_played":          row["games_played"]          + games,
-            "last_updated":          datetime.utcnow().isoformat()
-        }).eq("id", row["id"]).execute()
-    else:
-        supabase.table("positional_concessions_granular").insert({
-            "team_id":               team_id,
-            "season_id":             season_id,
-            "league_id":             league_id,
-            "position_id":           position_id,
-            "position_code":         position_code,
-            "broad_position":        broad_pos,
-            "goals_conceded":        goals,
-            "goals_conceded_home":   goals_home,
-            "goals_conceded_away":   goals_away,
-            "assists_conceded":      assists,
-            "assists_conceded_home": assists_home,
-            "assists_conceded_away": assists_away,
-            "bc_conceded":           bc,
-            "bc_conceded_home":      bc_home,
-            "bc_conceded_away":      bc_away,
-            "games_played":          games,
-        }).execute()
+        if existing.data:
+            row = existing.data[0]
+            supabase.table("positional_concessions_granular").update({
+                "goals_conceded":        row["goals_conceded"]                  + delta.get("goals", 0),
+                "goals_conceded_home":   row.get("goals_conceded_home", 0)      + delta.get("goals_home", 0),
+                "goals_conceded_away":   row.get("goals_conceded_away", 0)      + delta.get("goals_away", 0),
+                "assists_conceded":      row["assists_conceded"]                + delta.get("assists", 0),
+                "assists_conceded_home": row.get("assists_conceded_home", 0)    + delta.get("assists_home", 0),
+                "assists_conceded_away": row.get("assists_conceded_away", 0)    + delta.get("assists_away", 0),
+                "bc_conceded":           row.get("bc_conceded", 0)              + delta.get("bc", 0),
+                "bc_conceded_home":      row.get("bc_conceded_home", 0)         + delta.get("bc_home", 0),
+                "bc_conceded_away":      row.get("bc_conceded_away", 0)         + delta.get("bc_away", 0),
+                "games_played":          row["games_played"]                    + delta.get("games", 0),
+                "last_updated":          datetime.utcnow().isoformat()
+            }).eq("id", row["id"]).execute()
+        else:
+            supabase.table("positional_concessions_granular").insert({
+                "team_id":               team_id,
+                "season_id":             season_id,
+                "league_id":             league_id,
+                "position_id":           position_id,
+                "position_code":         delta["position_code"],
+                "broad_position":        delta["broad_pos"],
+                "goals_conceded":        delta.get("goals", 0),
+                "goals_conceded_home":   delta.get("goals_home", 0),
+                "goals_conceded_away":   delta.get("goals_away", 0),
+                "assists_conceded":      delta.get("assists", 0),
+                "assists_conceded_home": delta.get("assists_home", 0),
+                "assists_conceded_away": delta.get("assists_away", 0),
+                "bc_conceded":           delta.get("bc", 0),
+                "bc_conceded_home":      delta.get("bc_home", 0),
+                "bc_conceded_away":      delta.get("bc_away", 0),
+                "games_played":          delta.get("games", 0),
+            }).execute()
 
 
 # ── CORE: PROCESS ONE FIXTURE ─────────────────────────────────────────────────
 
 def process_fixture(fixture_id, season_id, league_id):
     if _already_processed(fixture_id):
-        print(f"  Fixture {fixture_id} already processed — skipping")
         return
-
-    print(f"  Processing fixture {fixture_id}...")
 
     try:
         fixture_data = _sm_get(
@@ -205,7 +216,7 @@ def process_fixture(fixture_id, season_id, league_id):
     away_team_id = None
     for p in participants:
         meta = p.get("meta", {})
-        loc = meta.get("location", "")
+        loc  = meta.get("location", "")
         if loc == "home": home_team_id = p.get("id")
         elif loc == "away": away_team_id = p.get("id")
 
@@ -220,11 +231,10 @@ def process_fixture(fixture_id, season_id, league_id):
     def is_home(team_id):
         return team_id == home_team_id
 
-    # ── Pull BC created per player from statistics ──
+    # ── Pull BC per player from statistics ──
     statistics = fixture.get("statistics", [])
     if isinstance(statistics, dict): statistics = statistics.get("data", [])
 
-    # type_id 580 = big chances created, player level
     player_bc = {}
     for stat in statistics:
         if stat.get("type_id") == 580:
@@ -233,14 +243,17 @@ def process_fixture(fixture_id, season_id, league_id):
             if pid:
                 player_bc[pid] = player_bc.get(pid, 0) + val
 
-    # ── Process goal events ──
+    # ── Accumulate all deltas in memory ──
+    # Structure: { team_id: { broad_pos: { goals, goals_home, ... } } }
+    broad_accum    = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    granular_accum = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    games_teams    = set()
+
     events = fixture.get("events", [])
     if isinstance(events, dict): events = events.get("data", [])
 
-    games_processed_teams = set()
-
     for event in events:
-        if event.get("type_id") != 14:  # goals only
+        if event.get("type_id") != 14:
             continue
 
         scorer_id     = event.get("player_id")
@@ -251,8 +264,10 @@ def process_fixture(fixture_id, season_id, league_id):
         if not opposing_team:
             continue
 
-        games_processed_teams.add(opposing_team)
+        games_teams.add(opposing_team)
         opp_is_home = is_home(opposing_team)
+        h = 1 if opp_is_home else 0
+        a = 0 if opp_is_home else 1
 
         # ── SCORER ──
         if scorer_id and scorer_id in player_positions:
@@ -261,20 +276,17 @@ def process_fixture(fixture_id, season_id, league_id):
                 pos_info["position_id"], pos_info["detailed_position_id"]
             )
             if broad:
-                _upsert_broad(
-                    opposing_team, season_id, league_id, broad,
-                    goals=1,
-                    goals_home=1 if opp_is_home else 0,
-                    goals_away=0 if opp_is_home else 1,
-                )
-            if pos_code and pos_code != broad:
-                _upsert_granular(
-                    opposing_team, season_id, league_id,
-                    pos_info["detailed_position_id"], pos_code, broad,
-                    goals=1,
-                    goals_home=1 if opp_is_home else 0,
-                    goals_away=0 if opp_is_home else 1,
-                )
+                broad_accum[opposing_team][broad]["goals"]       += 1
+                broad_accum[opposing_team][broad]["goals_home"]  += h
+                broad_accum[opposing_team][broad]["goals_away"]  += a
+
+            if pos_code and pos_code != broad and pos_info["detailed_position_id"]:
+                did = pos_info["detailed_position_id"]
+                granular_accum[opposing_team][did]["goals"]       += 1
+                granular_accum[opposing_team][did]["goals_home"]  += h
+                granular_accum[opposing_team][did]["goals_away"]  += a
+                granular_accum[opposing_team][did]["position_code"] = pos_code
+                granular_accum[opposing_team][did]["broad_pos"]     = broad
 
         # ── ASSISTER ──
         if assister_id and assister_id in player_positions:
@@ -283,59 +295,60 @@ def process_fixture(fixture_id, season_id, league_id):
                 pos_info["position_id"], pos_info["detailed_position_id"]
             )
             if broad:
-                _upsert_broad(
-                    opposing_team, season_id, league_id, broad,
-                    assists=1,
-                    assists_home=1 if opp_is_home else 0,
-                    assists_away=0 if opp_is_home else 1,
-                )
-            if pos_code and pos_code != broad:
-                _upsert_granular(
-                    opposing_team, season_id, league_id,
-                    pos_info["detailed_position_id"], pos_code, broad,
-                    assists=1,
-                    assists_home=1 if opp_is_home else 0,
-                    assists_away=0 if opp_is_home else 1,
-                )
+                broad_accum[opposing_team][broad]["assists"]       += 1
+                broad_accum[opposing_team][broad]["assists_home"]  += h
+                broad_accum[opposing_team][broad]["assists_away"]  += a
 
-    # ── Process BC conceded per player ──
+            if pos_code and pos_code != broad and pos_info["detailed_position_id"]:
+                did = pos_info["detailed_position_id"]
+                granular_accum[opposing_team][did]["assists"]       += 1
+                granular_accum[opposing_team][did]["assists_home"]  += h
+                granular_accum[opposing_team][did]["assists_away"]  += a
+                granular_accum[opposing_team][did]["position_code"] = pos_code
+                granular_accum[opposing_team][did]["broad_pos"]     = broad
+
+    # ── BC conceded ──
     for pid, bc_count in player_bc.items():
         if pid not in player_positions or bc_count == 0:
             continue
-        pos_info = player_positions[pid]
-        scoring_team = pos_info.get("team_id")
+        pos_info      = player_positions[pid]
+        scoring_team  = pos_info.get("team_id")
         opposing_team = get_opposing_team(scoring_team)
         if not opposing_team:
             continue
         opp_is_home = is_home(opposing_team)
+        h = 1 if opp_is_home else 0
+        a = 0 if opp_is_home else 1
 
         pos_code, broad = _get_position_info(
             pos_info["position_id"], pos_info["detailed_position_id"]
         )
         if broad:
-            _upsert_broad(
-                opposing_team, season_id, league_id, broad,
-                bc=bc_count,
-                bc_home=bc_count if opp_is_home else 0,
-                bc_away=0 if opp_is_home else bc_count,
-            )
-        if pos_code and pos_code != broad:
-            _upsert_granular(
-                opposing_team, season_id, league_id,
-                pos_info["detailed_position_id"], pos_code, broad,
-                bc=bc_count,
-                bc_home=bc_count if opp_is_home else 0,
-                bc_away=0 if opp_is_home else bc_count,
-            )
+            broad_accum[opposing_team][broad]["bc"]       += bc_count
+            broad_accum[opposing_team][broad]["bc_home"]  += h * bc_count
+            broad_accum[opposing_team][broad]["bc_away"]  += a * bc_count
 
-    # ── Apply games_played=1 per team ──
-    for team_id in games_processed_teams:
-        t_is_home = is_home(team_id)
+        if pos_code and pos_code != broad and pos_info["detailed_position_id"]:
+            did = pos_info["detailed_position_id"]
+            granular_accum[opposing_team][did]["bc"]       += bc_count
+            granular_accum[opposing_team][did]["bc_home"]  += h * bc_count
+            granular_accum[opposing_team][did]["bc_away"]  += a * bc_count
+            granular_accum[opposing_team][did]["position_code"] = pos_code
+            granular_accum[opposing_team][did]["broad_pos"]     = broad
+
+    # ── games_played increment for all 4 positions per team ──
+    for team_id in games_teams:
         for broad in ["GK", "DEF", "MID", "FWD"]:
-            _upsert_broad(team_id, season_id, league_id, broad, games=1)
+            broad_accum[team_id][broad]["games"] += 1
+
+    # ── Flush all accumulated data — one write per team/position ──
+    for team_id, pos_data in broad_accum.items():
+        _flush_broad(team_id, season_id, league_id, pos_data)
+
+    for team_id, pos_data in granular_accum.items():
+        _flush_granular(team_id, season_id, league_id, pos_data)
 
     _mark_processed(fixture_id)
-    print(f"  ✅ Fixture {fixture_id} processed")
 
 
 # ── BOOTSTRAP FULL SEASON ─────────────────────────────────────────────────────
@@ -372,35 +385,24 @@ def update_after_match(fixture_id, season_id, league_id):
 # ── LEAGUE AVERAGE CALCULATOR ─────────────────────────────────────────────────
 
 def _update_league_averages(season_id, league_id):
-    print(f"  Updating league averages...")
-
-    # ── BROAD ──
     broad_rows = supabase.table("positional_concessions_broad")\
         .select("*").eq("season_id", season_id).eq("league_id", league_id)\
         .execute().data
 
-    broad_groups = {}
+    broad_groups = defaultdict(lambda: defaultdict(float))
     for row in broad_rows:
         bp = row["broad_position"]
-        if bp not in broad_groups:
-            broad_groups[bp] = {
-                "goals":0,"goals_home":0,"goals_away":0,
-                "assists":0,"assists_home":0,"assists_away":0,
-                "bc":0,"bc_home":0,"bc_away":0,
-                "games":0,"teams":0
-            }
-        g = broad_groups[bp]
-        g["goals"]        += row["goals_conceded"]
-        g["goals_home"]   += row.get("goals_conceded_home", 0)
-        g["goals_away"]   += row.get("goals_conceded_away", 0)
-        g["assists"]      += row["assists_conceded"]
-        g["assists_home"] += row.get("assists_conceded_home", 0)
-        g["assists_away"] += row.get("assists_conceded_away", 0)
-        g["bc"]           += row.get("bc_conceded", 0)
-        g["bc_home"]      += row.get("bc_conceded_home", 0)
-        g["bc_away"]      += row.get("bc_conceded_away", 0)
-        g["games"]        += row["games_played"]
-        g["teams"]        += 1
+        broad_groups[bp]["goals"]        += row["goals_conceded"]
+        broad_groups[bp]["goals_home"]   += row.get("goals_conceded_home", 0)
+        broad_groups[bp]["goals_away"]   += row.get("goals_conceded_away", 0)
+        broad_groups[bp]["assists"]      += row["assists_conceded"]
+        broad_groups[bp]["assists_home"] += row.get("assists_conceded_home", 0)
+        broad_groups[bp]["assists_away"] += row.get("assists_conceded_away", 0)
+        broad_groups[bp]["bc"]           += row.get("bc_conceded", 0)
+        broad_groups[bp]["bc_home"]      += row.get("bc_conceded_home", 0)
+        broad_groups[bp]["bc_away"]      += row.get("bc_conceded_away", 0)
+        broad_groups[bp]["games"]        += row["games_played"]
+        broad_groups[bp]["teams"]        += 1
 
     for bp, t in broad_groups.items():
         gp = t["games"] or 1
@@ -410,81 +412,65 @@ def _update_league_averages(season_id, league_id):
             "broad_position":       bp,
             "position_code":        None,
             "granularity":          "broad",
-            "avg_goals_per_game":   t["goals"]   / gp,
-            "avg_assists_per_game": t["assists"] / gp,
+            "avg_goals_per_game":   t["goals"]        / gp,
+            "avg_assists_per_game": t["assists"]       / gp,
             "avg_goals_home":       t["goals_home"]   / gp,
             "avg_goals_away":       t["goals_away"]   / gp,
             "avg_assists_home":     t["assists_home"] / gp,
             "avg_assists_away":     t["assists_away"] / gp,
-            "avg_bc_per_game":      t["bc"]      / gp,
-            "avg_bc_home":          t["bc_home"] / gp,
-            "avg_bc_away":          t["bc_away"] / gp,
-            "sample_size":          t["teams"],
+            "avg_bc_per_game":      t["bc"]           / gp,
+            "avg_bc_home":          t["bc_home"]      / gp,
+            "avg_bc_away":          t["bc_away"]      / gp,
+            "sample_size":          int(t["teams"]),
             "last_updated":         datetime.utcnow().isoformat()
-        }).execute()
+        }, on_conflict="league_id,season_id,granularity,broad_position,position_code").execute()
 
-    # ── GRANULAR ──
     granular_rows = supabase.table("positional_concessions_granular")\
         .select("*").eq("season_id", season_id).eq("league_id", league_id)\
         .execute().data
 
-    granular_groups = {}
+    granular_groups = defaultdict(lambda: defaultdict(float))
+    gmeta = {}
     for row in granular_rows:
         pc = row["position_code"]
-        if pc not in granular_groups:
-            granular_groups[pc] = {
-                "goals":0,"goals_home":0,"goals_away":0,
-                "assists":0,"assists_home":0,"assists_away":0,
-                "bc":0,"bc_home":0,"bc_away":0,
-                "games":0,"teams":0,
-                "broad": row["broad_position"],
-                "position_id": row["position_id"]
-            }
-        g = granular_groups[pc]
-        g["goals"]        += row["goals_conceded"]
-        g["goals_home"]   += row.get("goals_conceded_home", 0)
-        g["goals_away"]   += row.get("goals_conceded_away", 0)
-        g["assists"]      += row["assists_conceded"]
-        g["assists_home"] += row.get("assists_conceded_home", 0)
-        g["assists_away"] += row.get("assists_conceded_away", 0)
-        g["bc"]           += row.get("bc_conceded", 0)
-        g["bc_home"]      += row.get("bc_conceded_home", 0)
-        g["bc_away"]      += row.get("bc_conceded_away", 0)
-        g["games"]        += row["games_played"]
-        g["teams"]        += 1
+        granular_groups[pc]["goals"]        += row["goals_conceded"]
+        granular_groups[pc]["goals_home"]   += row.get("goals_conceded_home", 0)
+        granular_groups[pc]["goals_away"]   += row.get("goals_conceded_away", 0)
+        granular_groups[pc]["assists"]      += row["assists_conceded"]
+        granular_groups[pc]["assists_home"] += row.get("assists_conceded_home", 0)
+        granular_groups[pc]["assists_away"] += row.get("assists_conceded_away", 0)
+        granular_groups[pc]["bc"]           += row.get("bc_conceded", 0)
+        granular_groups[pc]["bc_home"]      += row.get("bc_conceded_home", 0)
+        granular_groups[pc]["bc_away"]      += row.get("bc_conceded_away", 0)
+        granular_groups[pc]["games"]        += row["games_played"]
+        granular_groups[pc]["teams"]        += 1
+        gmeta[pc] = {"broad": row["broad_position"], "position_id": row["position_id"]}
 
     for pc, t in granular_groups.items():
         gp = t["games"] or 1
         supabase.table("positional_concessions_league_avg").upsert({
             "league_id":            league_id,
             "season_id":            season_id,
-            "broad_position":       t["broad"],
+            "broad_position":       gmeta[pc]["broad"],
             "position_code":        pc,
             "granularity":          "granular",
-            "avg_goals_per_game":   t["goals"]   / gp,
-            "avg_assists_per_game": t["assists"] / gp,
+            "avg_goals_per_game":   t["goals"]        / gp,
+            "avg_assists_per_game": t["assists"]       / gp,
             "avg_goals_home":       t["goals_home"]   / gp,
             "avg_goals_away":       t["goals_away"]   / gp,
             "avg_assists_home":     t["assists_home"] / gp,
             "avg_assists_away":     t["assists_away"] / gp,
-            "avg_bc_per_game":      t["bc"]      / gp,
-            "avg_bc_home":          t["bc_home"] / gp,
-            "avg_bc_away":          t["bc_away"] / gp,
-            "sample_size":          t["teams"],
+            "avg_bc_per_game":      t["bc"]           / gp,
+            "avg_bc_home":          t["bc_home"]      / gp,
+            "avg_bc_away":          t["bc_away"]      / gp,
+            "sample_size":          int(t["teams"]),
             "last_updated":         datetime.utcnow().isoformat()
-        }).execute()
-
-    print(f"  ✅ League averages updated")
+        }, on_conflict="league_id,season_id,granularity,broad_position,position_code").execute()
 
 
 # ── GET MULTIPLIERS FOR A FIXTURE ─────────────────────────────────────────────
 
 def get_multipliers(fixture_id, season_id, league_id):
-    """
-    Returns positional concession multipliers for both teams.
-    Uses home/away splits when available — home team gets home concession rates,
-    away team gets away concession rates.
-    """
     fixture_data = _sm_get(f"fixtures/{fixture_id}", {"include": "participants"})
     if not fixture_data:
         return {}
@@ -496,19 +482,18 @@ def get_multipliers(fixture_id, season_id, league_id):
     home_team_id = away_team_id = None
     for p in participants:
         meta = p.get("meta", {})
-        loc = meta.get("location", "")
+        loc  = meta.get("location", "")
         if loc == "home": home_team_id = p.get("id")
         elif loc == "away": away_team_id = p.get("id")
 
     if not home_team_id or not away_team_id:
         return {}
 
-    # Get league averages
     avg_rows = supabase.table("positional_concessions_league_avg")\
         .select("*").eq("season_id", season_id).eq("league_id", league_id)\
         .execute().data
 
-    league_avgs_broad = {}
+    league_avgs_broad    = {}
     league_avgs_granular = {}
     for row in avg_rows:
         if row["granularity"] == "broad":
@@ -522,7 +507,6 @@ def get_multipliers(fixture_id, season_id, league_id):
         team_is_home = (team_id == home_team_id)
         result[team_id] = {"broad": {}, "granular": {}}
 
-        # ── BROAD ──
         broad_rows = supabase.table("positional_concessions_broad")\
             .select("*").eq("team_id", team_id).eq("season_id", season_id)\
             .execute().data
@@ -532,18 +516,17 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_broad.get(bp, {})
             gp  = row["games_played"] or 1
 
-            # Use home/away split if available, else fall back to overall
             if team_is_home:
-                gpg   = row.get("goals_conceded_home", 0)   / gp
-                apg   = row.get("assists_conceded_home", 0) / gp
-                bcpg  = row.get("bc_conceded_home", 0)      / gp
+                gpg  = row.get("goals_conceded_home", 0)   / gp
+                apg  = row.get("assists_conceded_home", 0) / gp
+                bcpg = row.get("bc_conceded_home", 0)      / gp
                 avg_g = avg.get("avg_goals_home",   avg.get("avg_goals_per_game",   0.001))
                 avg_a = avg.get("avg_assists_home", avg.get("avg_assists_per_game", 0.001))
                 avg_b = avg.get("avg_bc_home",      avg.get("avg_bc_per_game",      0.001))
             else:
-                gpg   = row.get("goals_conceded_away", 0)   / gp
-                apg   = row.get("assists_conceded_away", 0) / gp
-                bcpg  = row.get("bc_conceded_away", 0)      / gp
+                gpg  = row.get("goals_conceded_away", 0)   / gp
+                apg  = row.get("assists_conceded_away", 0) / gp
+                bcpg = row.get("bc_conceded_away", 0)      / gp
                 avg_g = avg.get("avg_goals_away",   avg.get("avg_goals_per_game",   0.001))
                 avg_a = avg.get("avg_assists_away", avg.get("avg_assists_per_game", 0.001))
                 avg_b = avg.get("avg_bc_away",      avg.get("avg_bc_per_game",      0.001))
@@ -569,7 +552,6 @@ def get_multipliers(fixture_id, season_id, league_id):
                 "location":          "home" if team_is_home else "away",
             }
 
-        # ── GRANULAR ──
         granular_rows = supabase.table("positional_concessions_granular")\
             .select("*").eq("team_id", team_id).eq("season_id", season_id)\
             .execute().data
@@ -580,16 +562,16 @@ def get_multipliers(fixture_id, season_id, league_id):
             gp  = row["games_played"] or 1
 
             if team_is_home:
-                gpg   = row.get("goals_conceded_home", 0)   / gp
-                apg   = row.get("assists_conceded_home", 0) / gp
-                bcpg  = row.get("bc_conceded_home", 0)      / gp
+                gpg  = row.get("goals_conceded_home", 0)   / gp
+                apg  = row.get("assists_conceded_home", 0) / gp
+                bcpg = row.get("bc_conceded_home", 0)      / gp
                 avg_g = avg.get("avg_goals_home",   avg.get("avg_goals_per_game",   0.001))
                 avg_a = avg.get("avg_assists_home", avg.get("avg_assists_per_game", 0.001))
                 avg_b = avg.get("avg_bc_home",      avg.get("avg_bc_per_game",      0.001))
             else:
-                gpg   = row.get("goals_conceded_away", 0)   / gp
-                apg   = row.get("assists_conceded_away", 0) / gp
-                bcpg  = row.get("bc_conceded_away", 0)      / gp
+                gpg  = row.get("goals_conceded_away", 0)   / gp
+                apg  = row.get("assists_conceded_away", 0) / gp
+                bcpg = row.get("bc_conceded_away", 0)      / gp
                 avg_g = avg.get("avg_goals_away",   avg.get("avg_goals_per_game",   0.001))
                 avg_a = avg.get("avg_assists_away", avg.get("avg_assists_per_game", 0.001))
                 avg_b = avg.get("avg_bc_away",      avg.get("avg_bc_per_game",      0.001))
@@ -622,20 +604,20 @@ def get_multipliers(fixture_id, season_id, league_id):
 
 def apply_concession_multiplier(player_score, player_position_code,
                                  opponent_multipliers, score_type="assist"):
-    broad = BROAD_MAP.get(player_position_code, "MID")
+    broad   = BROAD_MAP.get(player_position_code, "MID")
     mult_key = "goal_multiplier" if score_type == "goal" else "assist_multiplier"
 
     multiplier = 1.0
-    flag = None
+    flag       = None
 
     granular = opponent_multipliers.get("granular", {})
     if player_position_code in granular:
         multiplier = granular[player_position_code].get(mult_key, 1.0)
-        flag = granular[player_position_code].get("flag")
+        flag       = granular[player_position_code].get("flag")
     else:
         broad_data = opponent_multipliers.get("broad", {})
         if broad in broad_data:
             multiplier = broad_data[broad].get(mult_key, 1.0)
-            flag = broad_data[broad].get("flag")
+            flag       = broad_data[broad].get("flag")
 
     return round(player_score * multiplier, 3), multiplier, flag
