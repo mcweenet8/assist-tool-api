@@ -69,7 +69,6 @@ def version():
 def fixtures():
     cached = _cache.get("fixtures")
     if not cached:
-        # Trigger background fetch and return empty — app will retry
         def bg():
             try:
                 f = get_sm_fixtures(days=7)
@@ -96,7 +95,6 @@ def refresh():
 
     def run_sm_refresh():
         try:
-            # Set ok immediately so app stops spinning
             _cache["status"]       = "ok"
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -150,7 +148,7 @@ def refresh():
             except Exception as e:
                 log.error(f"standings refresh error: {e}")
 
-            # Refresh season scores cache
+            # 4. Refresh season scores cache
             try:
                 _cache["season_scores"] = get_season_scores()
                 _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -178,7 +176,6 @@ def sm_today_context():
     """
     Returns concession context for today's fixtures.
     Maps player_id -> {concession_flag, concession_multiplier, opponent, fixture_id}
-    Used by Today tab to show matchup context on season players.
     """
     try:
         from .positional_concessions import get_multipliers, apply_concession_multiplier, GRANULAR_POSITION_MAP
@@ -188,7 +185,6 @@ def sm_today_context():
         fixtures = _cache.get("fixtures", {})
         today = datetime.now().strftime("%Y-%m-%d")
 
-        # Find today's fixtures
         today_fixtures = []
         for league_name, matches in fixtures.items():
             for m in matches:
@@ -204,12 +200,9 @@ def sm_today_context():
         if not today_fixtures:
             return jsonify({"context": {}, "count": 0})
 
-        # Get season scores for position data
         season_data = _cache.get("season_scores", {})
         players = season_data.get("players", [])
-        player_map = {str(p["player_id"]): p for p in players}
 
-        # Get concession multipliers per league
         LEAGUE_SEASON_MAP_LOCAL = {
             8:25583, 9:25648, 564:25659, 384:25533,
             82:25646, 301:25651, 779:26720, 1356:26529
@@ -218,12 +211,11 @@ def sm_today_context():
         context = {}
 
         for fixture in today_fixtures:
-            home_id = fixture.get("home_id")
-            away_id = fixture.get("away_id")
+            home_id    = fixture.get("home_id")
+            away_id    = fixture.get("away_id")
             fixture_id = fixture.get("match_id")
             league_name = fixture.get("league", "")
 
-            # Find league_id
             league_id = None
             for lid, lname in {8:"Premier League",9:"Championship",564:"La Liga",384:"Serie A",82:"Bundesliga",301:"Ligue 1",779:"MLS",1356:"A-League Men"}.items():
                 if lname == league_name:
@@ -239,12 +231,10 @@ def sm_today_context():
             except:
                 continue
 
-            # For each team, apply opponent's concession multipliers to their players
             for team_id, opponent_id in [(home_id, away_id), (away_id, home_id)]:
                 opponent_mults = mults.get(opponent_id, {})
                 if not opponent_mults: continue
 
-                # Find all players on this team
                 team_players = [p for p in players if str(p.get("team_id")) == str(team_id)]
 
                 for player in team_players:
@@ -254,7 +244,7 @@ def sm_today_context():
                     if not pos_code: continue
 
                     assist_index = player.get("assist_index") or 0
-                    goal_score = player.get("goal_score") or 0
+                    goal_score   = player.get("goal_score") or 0
 
                     _, assist_mult, assist_flag = apply_concession_multiplier(
                         assist_index, pos_code, opponent_mults, score_type="assist"
@@ -351,7 +341,88 @@ def sm_refresh_today():
     return jsonify({"status": "ok", "message": "SM refresh started in background"})
 
 
-# League → season_id mapping for team stats lookup
+# ── Match Day Results ─────────────────────────────────────────────────────────
+
+@app.route('/api/sm/results', methods=['GET'])
+def sm_results():
+    """
+    Returns all rows from sm_matchday_results where outcome_recorded=True.
+    App slices by game_date client-side.
+    Returns rows + per-date summary stats.
+    """
+    try:
+        from supabase import create_client
+        import statistics
+        from collections import defaultdict
+
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+
+        rows = sb.table("sm_matchday_results")\
+            .select("*")\
+            .eq("outcome_recorded", True)\
+            .order("game_date", desc=True)\
+            .execute().data
+
+        if not rows:
+            return jsonify({"results": [], "dates": [], "summaries": {}})
+
+        by_date = defaultdict(list)
+        for r in rows:
+            by_date[r["game_date"]].append(r)
+
+        summaries = {}
+        for date, date_rows in by_date.items():
+            contributors = [r for r in date_rows if r.get("had_contribution")]
+
+            assist_ranks = [r["sm_assist_rank"] for r in contributors if r.get("sm_assist_rank")]
+            goal_ranks   = [r["sm_goal_rank"]   for r in contributors if r.get("sm_goal_rank")]
+            tsoa_ranks   = [r["sm_tsoa_rank"]   for r in contributors if r.get("sm_tsoa_rank")]
+
+            def median(lst):
+                return round(statistics.median(lst), 1) if lst else None
+
+            def top_n_rate(lst, n=20):
+                if not lst: return None
+                return round(sum(1 for r in lst if r <= n) / len(lst), 2)
+
+            summaries[date] = {
+                "total_fixtures":     len(set(r["fixture_id"] for r in date_rows)),
+                "total_contributors": len(contributors),
+                "assist": {
+                    "median_rank": median(assist_ranks),
+                    "top20_rate":  top_n_rate(assist_ranks),
+                    "top20_count": sum(1 for r in assist_ranks if r <= 20),
+                    "total":       len(assist_ranks),
+                },
+                "goal": {
+                    "median_rank": median(goal_ranks),
+                    "top20_rate":  top_n_rate(goal_ranks),
+                    "top20_count": sum(1 for r in goal_ranks if r <= 20),
+                    "total":       len(goal_ranks),
+                },
+                "tsoa": {
+                    "median_rank": median(tsoa_ranks),
+                    "top20_rate":  top_n_rate(tsoa_ranks),
+                    "top20_count": sum(1 for r in tsoa_ranks if r <= 20),
+                    "total":       len(tsoa_ranks),
+                },
+            }
+
+        dates = sorted(by_date.keys(), reverse=True)
+
+        return jsonify({
+            "results":   rows,
+            "dates":     dates,
+            "summaries": summaries,
+        })
+
+    except Exception as e:
+        log.error(f"sm_results error: {e}")
+        return jsonify({"results": [], "dates": [], "summaries": {}, "error": str(e)}), 500
+
+
+# ── League → season_id mapping ────────────────────────────────────────────────
+
 LEAGUE_SEASON_MAP = {
     8:    25583,  # Premier League
     9:    25648,  # Championship
@@ -366,7 +437,6 @@ LEAGUE_SEASON_MAP = {
 def _get_team_ha_stats(team_id, season_id):
     """
     Pull home/away splits for a team from Sportmonks team statistics.
-    Returns dict with gf/ga home/away splits and per-game rates.
     """
     import requests as req
     token = os.environ.get("SPORTMONKS_API_TOKEN")
@@ -382,7 +452,6 @@ def _get_team_ha_stats(team_id, season_id):
             return {}
 
         records = r.json().get("data", [])
-        # Find the correct season
         season_record = next((rec for rec in records if rec.get("season_id") == season_id and rec.get("has_values")), None)
         if not season_record:
             return {}
@@ -401,7 +470,6 @@ def _get_team_ha_stats(team_id, season_id):
                 return val.get(scope, {}).get("average", 0) or 0
             return 0
 
-        # Goals for (52) and goals against (88)
         gf_home = get_count(52, "home")
         gf_away = get_count(52, "away")
         gf_all  = get_count(52, "all")
@@ -409,7 +477,6 @@ def _get_team_ha_stats(team_id, season_id):
         ga_away = get_count(88, "away")
         ga_all  = get_count(88, "all")
 
-        # Wins (214), Losses (192), Clean sheets (194)
         wins_home   = get_count(214, "home")
         wins_away   = get_count(214, "away")
         losses_home = get_count(192, "home")
@@ -417,34 +484,28 @@ def _get_team_ha_stats(team_id, season_id):
         cs_home     = get_count(194, "home")
         cs_away     = get_count(194, "away")
 
-        # Calculate games played home/away from wins+draws+losses
-        # Use overall played from standings cache as fallback
-        # Approximate home/away games as total/2
-        total_games = gf_all  # proxy
-        home_games  = wins_home + losses_home + (get_count(214, "all") - wins_home - wins_away)  # rough
-        # Simpler — use average goals which SM provides
         gf_pg_home = get_avg(52, "home")
         gf_pg_away = get_avg(52, "away")
         ga_pg_home = get_avg(88, "home")
         ga_pg_away = get_avg(88, "away")
 
         return {
-            "gf_all":       gf_all,
-            "gf_home":      gf_home,
-            "gf_away":      gf_away,
-            "ga_all":       ga_all,
-            "ga_home":      ga_home,
-            "ga_away":      ga_away,
-            "gf_pg_home":   round(gf_pg_home, 2),
-            "gf_pg_away":   round(gf_pg_away, 2),
-            "ga_pg_home":   round(ga_pg_home, 2),
-            "ga_pg_away":   round(ga_pg_away, 2),
-            "wins_home":    wins_home,
-            "wins_away":    wins_away,
-            "losses_home":  losses_home,
-            "losses_away":  losses_away,
-            "cs_home":      cs_home,
-            "cs_away":      cs_away,
+            "gf_all":        gf_all,
+            "gf_home":       gf_home,
+            "gf_away":       gf_away,
+            "ga_all":        ga_all,
+            "ga_home":       ga_home,
+            "ga_away":       ga_away,
+            "gf_pg_home":    round(gf_pg_home, 2),
+            "gf_pg_away":    round(gf_pg_away, 2),
+            "ga_pg_home":    round(ga_pg_home, 2),
+            "ga_pg_away":    round(ga_pg_away, 2),
+            "wins_home":     wins_home,
+            "wins_away":     wins_away,
+            "losses_home":   losses_home,
+            "losses_away":   losses_away,
+            "cs_home":       cs_home,
+            "cs_away":       cs_away,
             "weak_def_home": ga_pg_home >= 1.5,
             "weak_def_away": ga_pg_away >= 1.5,
         }
@@ -455,21 +516,17 @@ def _get_team_ha_stats(team_id, season_id):
 
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
-    """
-    Return home + away squad DC scores + home/away stats for a fixture.
-    """
+    """Return home + away squad DC scores + home/away stats for a fixture."""
     try:
-        # Find fixture in cache
         fixtures = _cache.get("fixtures", {})
         home_id = away_id = home_name = away_name = league_id = None
         for league, matches in fixtures.items():
             for m in matches:
                 if str(m.get("match_id")) == str(fixture_id):
-                    home_id    = m.get("home_id")
-                    away_id    = m.get("away_id")
-                    home_name  = m.get("home")
-                    away_name  = m.get("away")
-                    # Find league_id from league name
+                    home_id   = m.get("home_id")
+                    away_id   = m.get("away_id")
+                    home_name = m.get("home")
+                    away_name = m.get("away")
                     for lid, lname in {8:"Premier League",9:"Championship",564:"La Liga",384:"Serie A",82:"Bundesliga",301:"Ligue 1",779:"MLS",1356:"A-League Men"}.items():
                         if lname == league:
                             league_id = lid
@@ -481,20 +538,15 @@ def sm_match(fixture_id):
         if not home_id or not away_id:
             return jsonify({"error": "Fixture not found in cache — hit Refresh"}), 404
 
-        # Get season_id for this league
-        season_id = LEAGUE_SEASON_MAP.get(league_id)
-
-        # Pull squad DC scores from cache
+        season_id   = LEAGUE_SEASON_MAP.get(league_id)
         season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
         home_players = sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
         away_players = sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
 
-        # Pull home/away stats on demand
         home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
         away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
 
-        # Pull lineups + formations from SM
         lineup_data = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
         try:
             import requests as req
@@ -504,30 +556,32 @@ def sm_match(fixture_id):
                 params={"api_token": token, "include": "lineups;formations"},
                 timeout=15)
             if r.status_code == 200:
-                fdata = r.json().get("data", {})
-                lineups = fdata.get("lineups", [])
+                fdata    = r.json().get("data", {})
+                lineups  = fdata.get("lineups", [])
                 if isinstance(lineups, dict): lineups = lineups.get("data", [])
                 formations = fdata.get("formations", [])
                 if isinstance(formations, dict): formations = formations.get("data", [])
 
-                starters = [p for p in lineups if p.get("type_id") == 11]
-                subs     = [p for p in lineups if p.get("type_id") == 12]
-
-                # Get season scores for DC score enrichment
-                all_players = season_data.get("players", [])
+                starters  = [p for p in lineups if p.get("type_id") == 11]
+                subs      = [p for p in lineups if p.get("type_id") == 12]
                 score_map = {str(p["player_id"]): p for p in all_players}
 
                 def enrich(player):
                     pid = str(player.get("player_id"))
-                    dc = score_map.get(pid, {})
-                    return {**player, "assist_index": dc.get("assist_index"), "goal_score": dc.get("goal_score"), "tsoa_score": dc.get("tsoa_score"), "position_id": dc.get("position_id"), "detailed_position_id": dc.get("detailed_position_id")}
+                    dc  = score_map.get(pid, {})
+                    return {**player,
+                            "assist_index":        dc.get("assist_index"),
+                            "goal_score":          dc.get("goal_score"),
+                            "tsoa_score":          dc.get("tsoa_score"),
+                            "position_id":         dc.get("position_id"),
+                            "detailed_position_id":dc.get("detailed_position_id")}
 
                 lineup_data = {
-                    "starters":        [enrich(p) for p in starters],
-                    "subs":            [enrich(p) for p in subs],
-                    "home_formation":  next((f["formation"] for f in formations if f.get("participant_id") == home_id), None),
-                    "away_formation":  next((f["formation"] for f in formations if f.get("participant_id") == away_id), None),
-                    "confirmed":       len(starters) >= 20,
+                    "starters":       [enrich(p) for p in starters],
+                    "subs":           [enrich(p) for p in subs],
+                    "home_formation": next((f["formation"] for f in formations if f.get("participant_id") == home_id), None),
+                    "away_formation": next((f["formation"] for f in formations if f.get("participant_id") == away_id), None),
+                    "confirmed":      len(starters) >= 20,
                 }
         except Exception as e:
             log.error(f"lineup pull error {fixture_id}: {e}")
@@ -554,11 +608,7 @@ def sm_match(fixture_id):
 
 @app.route('/api/sm/standings', methods=['GET'])
 def sm_standings():
-    """
-    Return league standings for all tracked leagues from Sportmonks.
-    Cached for 1 hour — refreshed on /refresh call.
-    """
-    # Serve from cache if available
+    """Return league standings for all tracked leagues from Sportmonks."""
     if _cache.get("standings"):
         return jsonify({
             "standings":    _cache["standings"],
@@ -566,8 +616,6 @@ def sm_standings():
             "source":       "sportmonks",
         })
 
-    # Build standings in background and return empty
-    import threading
     def fetch_standings():
         try:
             import requests as req
@@ -585,15 +633,7 @@ def sm_standings():
                 {"league_id": 1356, "season_id": 26529, "name": "A-League Men"},
             ]
 
-            # Standing detail type_ids
-            GP  = 129  # games played
-            W   = 130  # wins
-            L   = 131  # losses
-            D   = 132  # draws (home)
-            GF  = 133  # goals for
-            GA  = 134  # goals against
-            CS  = 135  # clean sheets
-            PTS = 187  # points
+            GP=129;W=130;L=131;D=132;GF=133;GA=134;CS=135;PTS=187
 
             def get_val(details, type_id):
                 for d in details:
@@ -602,7 +642,6 @@ def sm_standings():
                 return 0
 
             result = {}
-
             for league in LEAGUES:
                 r = req.get(
                     f"{base}/standings/seasons/{league['season_id']}",
@@ -612,7 +651,7 @@ def sm_standings():
                 if r.status_code != 200:
                     continue
 
-                rows = r.json().get("data", [])
+                rows  = r.json().get("data", [])
                 teams = []
                 for row in rows:
                     p    = row.get("participant", {})
@@ -623,32 +662,32 @@ def sm_standings():
                     ga_pg = round(ga / gp, 2) if gp else 0
                     gf_pg = round(gf / gp, 2) if gp else 0
                     teams.append({
-                        "position":   row.get("position"),
-                        "team_id":    str(p.get("id","")),
-                        "team":       p.get("name",""),
-                        "short_code": p.get("short_code",""),
-                        "logo":       p.get("image_path",""),
-                        "played":     gp,
-                        "wins":       get_val(dets, W),
-                        "draws":      get_val(dets, D),
-                        "losses":     get_val(dets, L),
-                        "goals_for":  gf,
+                        "position":      row.get("position"),
+                        "team_id":       str(p.get("id","")),
+                        "team":          p.get("name",""),
+                        "short_code":    p.get("short_code",""),
+                        "logo":          p.get("image_path",""),
+                        "played":        gp,
+                        "wins":          get_val(dets, W),
+                        "draws":         get_val(dets, D),
+                        "losses":        get_val(dets, L),
+                        "goals_for":     gf,
                         "goals_against": ga,
                         "clean_sheets":  get_val(dets, CS),
-                        "points":     row.get("points", 0),
-                        "gf_pg":      gf_pg,
-                        "ga_pg":      ga_pg,
-                        "goal_diff":  gf - ga,
-                        "weak_def":   ga_pg >= 1.5,
-                        "league_id":  league["league_id"],
-                        "league":     league["name"],
+                        "points":        row.get("points", 0),
+                        "gf_pg":         gf_pg,
+                        "ga_pg":         ga_pg,
+                        "goal_diff":     gf - ga,
+                        "weak_def":      ga_pg >= 1.5,
+                        "league_id":     league["league_id"],
+                        "league":        league["name"],
                     })
 
                 teams.sort(key=lambda x: x["position"] or 99)
                 result[league["name"]] = teams
                 log.info(f"Standings loaded: {league['name']} ({len(teams)} teams)")
 
-            _cache["standings"]             = result
+            _cache["standings"]              = result
             _cache["standings_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info("All standings cached")
 
