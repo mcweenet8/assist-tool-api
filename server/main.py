@@ -17,7 +17,7 @@ CORS(app)
 
 # ── Sportmonks imports ────────────────────────────────────────────────────────
 
-from .positional_concessions import bootstrap_season, update_after_match, get_multipliers
+from .positional_concessions import bootstrap_season, update_after_match, get_multipliers, process_fixture
 from .sm_baseline import bootstrap_baselines, refresh_baselines
 from .sm_scorer import score_todays_fixtures, get_latest_scores, get_season_scores
 from .pipeline_comparison import build_comparison_for_date, record_outcomes, get_running_totals
@@ -27,7 +27,6 @@ from .sm_fixtures import get_sm_fixtures
 # ── Boot — pre-warm season scores cache ──────────────────────────────────────
 
 def _prewarm_cache():
-    """Pre-calculate season scores on boot so first request is instant."""
     try:
         log.info("Pre-warming season scores cache...")
         _cache["season_scores"] = get_season_scores()
@@ -98,18 +97,15 @@ def refresh():
             _cache["status"]       = "ok"
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-            # 1. Refresh SM fixtures
             log.info("SM fixtures refresh starting...")
             fix = get_sm_fixtures(days=7)
             _cache["fixtures"] = fix
             _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info(f"SM fixtures: {sum(len(v) for v in fix.values())} total")
 
-            # 2. Score today + snapshot
             score_todays_fixtures()
             build_comparison_for_date()
 
-            # 3. Refresh standings
             try:
                 import requests as req
                 token = os.environ.get("SPORTMONKS_API_TOKEN")
@@ -148,7 +144,6 @@ def refresh():
             except Exception as e:
                 log.error(f"standings refresh error: {e}")
 
-            # 4. Refresh season scores cache
             try:
                 _cache["season_scores"] = get_season_scores()
                 _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -163,20 +158,11 @@ def refresh():
             log.error(f"SM refresh failed: {e}")
 
     threading.Thread(target=run_sm_refresh, daemon=True).start()
-
-    return jsonify({
-        "success":  True,
-        "message":  "SM refresh started in background",
-        "version":  APP_VERSION,
-    })
+    return jsonify({"success": True, "message": "SM refresh started in background", "version": APP_VERSION})
 
 
 @app.route('/api/sm/today-context', methods=['GET'])
 def sm_today_context():
-    """
-    Returns concession context for today's fixtures.
-    Maps player_id -> {concession_flag, concession_multiplier, opponent, fixture_id}
-    """
     try:
         from .positional_concessions import get_multipliers, apply_concession_multiplier, GRANULAR_POSITION_MAP
         from supabase import create_client
@@ -211,9 +197,9 @@ def sm_today_context():
         context = {}
 
         for fixture in today_fixtures:
-            home_id    = fixture.get("home_id")
-            away_id    = fixture.get("away_id")
-            fixture_id = fixture.get("match_id")
+            home_id     = fixture.get("home_id")
+            away_id     = fixture.get("away_id")
+            fixture_id  = fixture.get("match_id")
             league_name = fixture.get("league", "")
 
             league_id = None
@@ -273,7 +259,6 @@ def sm_today_context():
 
 @app.route('/api/sm/season/refresh', methods=['POST'])
 def sm_season_refresh():
-    """Force refresh season scores cache."""
     def run():
         _cache["season_scores"] = get_season_scores()
         _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -282,15 +267,9 @@ def sm_season_refresh():
     return jsonify({"status": "ok", "message": "Season scores refreshing"})
 
 
-# ── Standings (stub — returns empty until SM standings built) ─────────────────
-
 @app.route("/standings")
 def standings():
-    return jsonify({
-        "last_updated": _cache.get("last_updated", ""),
-        "standings":    {},
-        "version":      APP_VERSION,
-    })
+    return jsonify({"last_updated": _cache.get("last_updated", ""), "standings": {}, "version": APP_VERSION})
 
 
 # ── SM Player data ────────────────────────────────────────────────────────────
@@ -312,11 +291,7 @@ def sm_season():
 def sm_fixtures_route():
     cached = _cache.get("fixtures")
     if cached:
-        return jsonify({
-            "fixtures":     cached,
-            "last_updated": _cache.get("fixtures_last_updated", ""),
-            "source":       "sportmonks",
-        })
+        return jsonify({"fixtures": cached, "last_updated": _cache.get("fixtures_last_updated", ""), "source": "sportmonks"})
     return jsonify({"fixtures": {}, "last_updated": "", "source": "sportmonks", "loading": True})
 
 
@@ -345,11 +320,6 @@ def sm_refresh_today():
 
 @app.route('/api/sm/results', methods=['GET'])
 def sm_results():
-    """
-    Returns all rows from sm_matchday_results where outcome_recorded=True.
-    App slices by game_date client-side.
-    Returns rows + per-date summary stats.
-    """
     try:
         from supabase import create_client
         import statistics
@@ -373,7 +343,6 @@ def sm_results():
         summaries = {}
         for date, date_rows in by_date.items():
             contributors = [r for r in date_rows if r.get("had_contribution")]
-
             assist_ranks = [r["sm_assist_rank"] for r in contributors if r.get("sm_assist_rank")]
             goal_ranks   = [r["sm_goal_rank"]   for r in contributors if r.get("sm_goal_rank")]
             tsoa_ranks   = [r["sm_tsoa_rank"]   for r in contributors if r.get("sm_tsoa_rank")]
@@ -388,33 +357,12 @@ def sm_results():
             summaries[date] = {
                 "total_fixtures":     len(set(r["fixture_id"] for r in date_rows)),
                 "total_contributors": len(contributors),
-                "assist": {
-                    "median_rank": median(assist_ranks),
-                    "top20_rate":  top_n_rate(assist_ranks),
-                    "top20_count": sum(1 for r in assist_ranks if r <= 20),
-                    "total":       len(assist_ranks),
-                },
-                "goal": {
-                    "median_rank": median(goal_ranks),
-                    "top20_rate":  top_n_rate(goal_ranks),
-                    "top20_count": sum(1 for r in goal_ranks if r <= 20),
-                    "total":       len(goal_ranks),
-                },
-                "tsoa": {
-                    "median_rank": median(tsoa_ranks),
-                    "top20_rate":  top_n_rate(tsoa_ranks),
-                    "top20_count": sum(1 for r in tsoa_ranks if r <= 20),
-                    "total":       len(tsoa_ranks),
-                },
+                "assist": {"median_rank": median(assist_ranks), "top20_rate": top_n_rate(assist_ranks), "top20_count": sum(1 for r in assist_ranks if r <= 20), "total": len(assist_ranks)},
+                "goal":   {"median_rank": median(goal_ranks),   "top20_rate": top_n_rate(goal_ranks),   "top20_count": sum(1 for r in goal_ranks   if r <= 20), "total": len(goal_ranks)},
+                "tsoa":   {"median_rank": median(tsoa_ranks),   "top20_rate": top_n_rate(tsoa_ranks),   "top20_count": sum(1 for r in tsoa_ranks   if r <= 20), "total": len(tsoa_ranks)},
             }
 
-        dates = sorted(by_date.keys(), reverse=True)
-
-        return jsonify({
-            "results":   rows,
-            "dates":     dates,
-            "summaries": summaries,
-        })
+        return jsonify({"results": rows, "dates": sorted(by_date.keys(), reverse=True), "summaries": summaries})
 
     except Exception as e:
         log.error(f"sm_results error: {e}")
@@ -424,90 +372,42 @@ def sm_results():
 # ── League → season_id mapping ────────────────────────────────────────────────
 
 LEAGUE_SEASON_MAP = {
-    8:    25583,  # Premier League
-    9:    25648,  # Championship
-    564:  25659,  # La Liga
-    384:  25533,  # Serie A
-    82:   25646,  # Bundesliga
-    301:  25651,  # Ligue 1
-    779:  26720,  # MLS
-    1356: 26529,  # A-League Men
+    8:    25583, 9:    25648, 564:  25659, 384:  25533,
+    82:   25646, 301:  25651, 779:  26720, 1356: 26529,
 }
 
+
 def _get_team_ha_stats(team_id, season_id):
-    """
-    Pull home/away splits for a team from Sportmonks team statistics.
-    """
     import requests as req
     token = os.environ.get("SPORTMONKS_API_TOKEN")
     base  = "https://api.sportmonks.com/v3/football"
-
     try:
-        r = req.get(
-            f"{base}/statistics/seasons/teams/{team_id}",
-            params={"api_token": token},
-            timeout=15
-        )
-        if r.status_code != 200:
-            return {}
-
+        r = req.get(f"{base}/statistics/seasons/teams/{team_id}", params={"api_token": token}, timeout=15)
+        if r.status_code != 200: return {}
         records = r.json().get("data", [])
         season_record = next((rec for rec in records if rec.get("season_id") == season_id and rec.get("has_values")), None)
-        if not season_record:
-            return {}
-
+        if not season_record: return {}
         details = {d["type_id"]: d["value"] for d in season_record.get("details", [])}
 
         def get_count(type_id, scope="all"):
             val = details.get(type_id, {})
-            if isinstance(val, dict):
-                return val.get(scope, {}).get("count", 0) or val.get(scope, {}).get("average", 0) or 0
+            if isinstance(val, dict): return val.get(scope, {}).get("count", 0) or val.get(scope, {}).get("average", 0) or 0
             return 0
 
         def get_avg(type_id, scope="all"):
             val = details.get(type_id, {})
-            if isinstance(val, dict):
-                return val.get(scope, {}).get("average", 0) or 0
+            if isinstance(val, dict): return val.get(scope, {}).get("average", 0) or 0
             return 0
 
-        gf_home = get_count(52, "home")
-        gf_away = get_count(52, "away")
-        gf_all  = get_count(52, "all")
-        ga_home = get_count(88, "home")
-        ga_away = get_count(88, "away")
-        ga_all  = get_count(88, "all")
-
-        wins_home   = get_count(214, "home")
-        wins_away   = get_count(214, "away")
-        losses_home = get_count(192, "home")
-        losses_away = get_count(192, "away")
-        cs_home     = get_count(194, "home")
-        cs_away     = get_count(194, "away")
-
-        gf_pg_home = get_avg(52, "home")
-        gf_pg_away = get_avg(52, "away")
-        ga_pg_home = get_avg(88, "home")
-        ga_pg_away = get_avg(88, "away")
-
         return {
-            "gf_all":        gf_all,
-            "gf_home":       gf_home,
-            "gf_away":       gf_away,
-            "ga_all":        ga_all,
-            "ga_home":       ga_home,
-            "ga_away":       ga_away,
-            "gf_pg_home":    round(gf_pg_home, 2),
-            "gf_pg_away":    round(gf_pg_away, 2),
-            "ga_pg_home":    round(ga_pg_home, 2),
-            "ga_pg_away":    round(ga_pg_away, 2),
-            "wins_home":     wins_home,
-            "wins_away":     wins_away,
-            "losses_home":   losses_home,
-            "losses_away":   losses_away,
-            "cs_home":       cs_home,
-            "cs_away":       cs_away,
-            "weak_def_home": ga_pg_home >= 1.5,
-            "weak_def_away": ga_pg_away >= 1.5,
+            "gf_all": get_count(52,"all"), "gf_home": get_count(52,"home"), "gf_away": get_count(52,"away"),
+            "ga_all": get_count(88,"all"), "ga_home": get_count(88,"home"), "ga_away": get_count(88,"away"),
+            "gf_pg_home": round(get_avg(52,"home"),2), "gf_pg_away": round(get_avg(52,"away"),2),
+            "ga_pg_home": round(get_avg(88,"home"),2), "ga_pg_away": round(get_avg(88,"away"),2),
+            "wins_home": get_count(214,"home"), "wins_away": get_count(214,"away"),
+            "losses_home": get_count(192,"home"), "losses_away": get_count(192,"away"),
+            "cs_home": get_count(194,"home"), "cs_away": get_count(194,"away"),
+            "weak_def_home": get_avg(88,"home") >= 1.5, "weak_def_away": get_avg(88,"away") >= 1.5,
         }
     except Exception as e:
         log.error(f"team ha stats error {team_id}: {e}")
@@ -516,24 +416,18 @@ def _get_team_ha_stats(team_id, season_id):
 
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
-    """Return home + away squad DC scores + home/away stats for a fixture."""
     try:
         fixtures = _cache.get("fixtures", {})
         home_id = away_id = home_name = away_name = league_id = None
         for league, matches in fixtures.items():
             for m in matches:
                 if str(m.get("match_id")) == str(fixture_id):
-                    home_id   = m.get("home_id")
-                    away_id   = m.get("away_id")
-                    home_name = m.get("home")
-                    away_name = m.get("away")
+                    home_id = m.get("home_id"); away_id = m.get("away_id")
+                    home_name = m.get("home"); away_name = m.get("away")
                     for lid, lname in {8:"Premier League",9:"Championship",564:"La Liga",384:"Serie A",82:"Bundesliga",301:"Ligue 1",779:"MLS",1356:"A-League Men"}.items():
-                        if lname == league:
-                            league_id = lid
-                            break
+                        if lname == league: league_id = lid; break
                     break
-            if home_id:
-                break
+            if home_id: break
 
         if not home_id or not away_id:
             return jsonify({"error": "Fixture not found in cache — hit Refresh"}), 404
@@ -552,16 +446,13 @@ def sm_match(fixture_id):
             import requests as req
             token = os.environ.get("SPORTMONKS_API_TOKEN")
             base  = "https://api.sportmonks.com/v3/football"
-            r = req.get(f"{base}/fixtures/{fixture_id}",
-                params={"api_token": token, "include": "lineups;formations"},
-                timeout=15)
+            r = req.get(f"{base}/fixtures/{fixture_id}", params={"api_token": token, "include": "lineups;formations"}, timeout=15)
             if r.status_code == 200:
-                fdata    = r.json().get("data", {})
-                lineups  = fdata.get("lineups", [])
+                fdata = r.json().get("data", {})
+                lineups = fdata.get("lineups", [])
                 if isinstance(lineups, dict): lineups = lineups.get("data", [])
                 formations = fdata.get("formations", [])
                 if isinstance(formations, dict): formations = formations.get("data", [])
-
                 starters  = [p for p in lineups if p.get("type_id") == 11]
                 subs      = [p for p in lineups if p.get("type_id") == 12]
                 score_map = {str(p["player_id"]): p for p in all_players}
@@ -569,36 +460,23 @@ def sm_match(fixture_id):
                 def enrich(player):
                     pid = str(player.get("player_id"))
                     dc  = score_map.get(pid, {})
-                    return {**player,
-                            "assist_index":        dc.get("assist_index"),
-                            "goal_score":          dc.get("goal_score"),
-                            "tsoa_score":          dc.get("tsoa_score"),
-                            "position_id":         dc.get("position_id"),
-                            "detailed_position_id":dc.get("detailed_position_id")}
+                    return {**player, "assist_index": dc.get("assist_index"), "goal_score": dc.get("goal_score"), "tsoa_score": dc.get("tsoa_score"), "position_id": dc.get("position_id"), "detailed_position_id": dc.get("detailed_position_id")}
 
                 lineup_data = {
-                    "starters":       [enrich(p) for p in starters],
-                    "subs":           [enrich(p) for p in subs],
+                    "starters": [enrich(p) for p in starters], "subs": [enrich(p) for p in subs],
                     "home_formation": next((f["formation"] for f in formations if f.get("participant_id") == home_id), None),
                     "away_formation": next((f["formation"] for f in formations if f.get("participant_id") == away_id), None),
-                    "confirmed":      len(starters) >= 20,
+                    "confirmed": len(starters) >= 20,
                 }
         except Exception as e:
             log.error(f"lineup pull error {fixture_id}: {e}")
 
         return jsonify({
-            "fixture_id":   fixture_id,
-            "home":         home_name,
-            "away":         away_name,
-            "home_id":      home_id,
-            "away_id":      away_id,
-            "home_players": home_players[:15],
-            "away_players": away_players[:15],
-            "total_home":   len(home_players),
-            "total_away":   len(away_players),
-            "home_ha":      home_ha,
-            "away_ha":      away_ha,
-            "lineup":       lineup_data,
+            "fixture_id": fixture_id, "home": home_name, "away": away_name,
+            "home_id": home_id, "away_id": away_id,
+            "home_players": home_players[:15], "away_players": away_players[:15],
+            "total_home": len(home_players), "total_away": len(away_players),
+            "home_ha": home_ha, "away_ha": away_ha, "lineup": lineup_data,
         })
 
     except Exception as e:
@@ -608,20 +486,14 @@ def sm_match(fixture_id):
 
 @app.route('/api/sm/standings', methods=['GET'])
 def sm_standings():
-    """Return league standings for all tracked leagues from Sportmonks."""
     if _cache.get("standings"):
-        return jsonify({
-            "standings":    _cache["standings"],
-            "last_updated": _cache.get("standings_last_updated", ""),
-            "source":       "sportmonks",
-        })
+        return jsonify({"standings": _cache["standings"], "last_updated": _cache.get("standings_last_updated", ""), "source": "sportmonks"})
 
     def fetch_standings():
         try:
             import requests as req
             token = os.environ.get("SPORTMONKS_API_TOKEN")
             base  = "https://api.sportmonks.com/v3/football"
-
             LEAGUES = [
                 {"league_id": 8,    "season_id": 25583, "name": "Premier League"},
                 {"league_id": 9,    "season_id": 25648, "name": "Championship"},
@@ -632,65 +504,28 @@ def sm_standings():
                 {"league_id": 779,  "season_id": 26720, "name": "MLS"},
                 {"league_id": 1356, "season_id": 26529, "name": "A-League Men"},
             ]
-
             GP=129;W=130;L=131;D=132;GF=133;GA=134;CS=135;PTS=187
-
             def get_val(details, type_id):
                 for d in details:
-                    if d.get("type_id") == type_id:
-                        return d.get("value", 0)
+                    if d.get("type_id") == type_id: return d.get("value", 0)
                 return 0
-
             result = {}
             for league in LEAGUES:
-                r = req.get(
-                    f"{base}/standings/seasons/{league['season_id']}",
-                    params={"api_token": token, "include": "participant;details"},
-                    timeout=30
-                )
-                if r.status_code != 200:
-                    continue
-
-                rows  = r.json().get("data", [])
+                r = req.get(f"{base}/standings/seasons/{league['season_id']}", params={"api_token": token, "include": "participant;details"}, timeout=30)
+                if r.status_code != 200: continue
+                rows = r.json().get("data", [])
                 teams = []
                 for row in rows:
-                    p    = row.get("participant", {})
-                    dets = row.get("details", [])
-                    gp   = get_val(dets, GP)
-                    gf   = get_val(dets, GF)
-                    ga   = get_val(dets, GA)
-                    ga_pg = round(ga / gp, 2) if gp else 0
-                    gf_pg = round(gf / gp, 2) if gp else 0
-                    teams.append({
-                        "position":      row.get("position"),
-                        "team_id":       str(p.get("id","")),
-                        "team":          p.get("name",""),
-                        "short_code":    p.get("short_code",""),
-                        "logo":          p.get("image_path",""),
-                        "played":        gp,
-                        "wins":          get_val(dets, W),
-                        "draws":         get_val(dets, D),
-                        "losses":        get_val(dets, L),
-                        "goals_for":     gf,
-                        "goals_against": ga,
-                        "clean_sheets":  get_val(dets, CS),
-                        "points":        row.get("points", 0),
-                        "gf_pg":         gf_pg,
-                        "ga_pg":         ga_pg,
-                        "goal_diff":     gf - ga,
-                        "weak_def":      ga_pg >= 1.5,
-                        "league_id":     league["league_id"],
-                        "league":        league["name"],
-                    })
-
+                    p = row.get("participant", {}); dets = row.get("details", [])
+                    gp = get_val(dets,GP); gf = get_val(dets,GF); ga = get_val(dets,GA)
+                    ga_pg = round(ga/gp,2) if gp else 0; gf_pg = round(gf/gp,2) if gp else 0
+                    teams.append({"position": row.get("position"), "team_id": str(p.get("id","")), "team": p.get("name",""), "short_code": p.get("short_code",""), "logo": p.get("image_path",""), "played": gp, "wins": get_val(dets,W), "draws": get_val(dets,D), "losses": get_val(dets,L), "goals_for": gf, "goals_against": ga, "clean_sheets": get_val(dets,CS), "points": row.get("points",0), "gf_pg": gf_pg, "ga_pg": ga_pg, "goal_diff": gf-ga, "weak_def": ga_pg>=1.5, "league_id": league["league_id"], "league": league["name"]})
                 teams.sort(key=lambda x: x["position"] or 99)
                 result[league["name"]] = teams
                 log.info(f"Standings loaded: {league['name']} ({len(teams)} teams)")
-
-            _cache["standings"]              = result
+            _cache["standings"] = result
             _cache["standings_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info("All standings cached")
-
         except Exception as e:
             log.error(f"standings fetch error: {e}")
 
@@ -700,11 +535,9 @@ def sm_standings():
 
 @app.route('/api/sm/team-stats/<int:team_id>', methods=['GET'])
 def sm_team_stats(team_id):
-    """Return home/away stats for a team. Used by TeamProfile modal."""
     try:
         season_id = request.args.get('season_id', type=int)
-        if not season_id:
-            return jsonify({"error": "season_id required"}), 400
+        if not season_id: return jsonify({"error": "season_id required"}), 400
         stats = _get_team_ha_stats(team_id, season_id)
         return jsonify({"stats": stats, "team_id": team_id, "season_id": season_id})
     except Exception as e:
@@ -727,21 +560,43 @@ def concessions_bootstrap():
     return jsonify({"status": "ok"})
 
 
+@app.route('/api/concessions/process-fixture', methods=['POST'])
+def concessions_process_fixture():
+    """
+    Process a single fixture for positional concessions.
+    Accepts: { fixture_id, season_id, league_id }
+    Called by the Colab per-league bootstrap cell.
+    """
+    try:
+        data       = request.json or {}
+        fixture_id = data.get("fixture_id")
+        season_id  = data.get("season_id")
+        league_id  = data.get("league_id")
+
+        if not fixture_id or not season_id or not league_id:
+            return jsonify({"error": "fixture_id, season_id and league_id required"}), 400
+
+        process_fixture(int(fixture_id), int(season_id), int(league_id))
+        return jsonify({"status": "ok", "fixture_id": fixture_id})
+
+    except Exception as e:
+        log.error(f"process-fixture error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Comparison / outcomes ─────────────────────────────────────────────────────
 
 @app.route('/api/comparison/build', methods=['POST'])
 def comparison_build():
-    data      = request.json or {}
-    game_date = data.get('date', None)
-    threading.Thread(target=build_comparison_for_date, args=(game_date,), daemon=True).start()
+    data = request.json or {}
+    threading.Thread(target=build_comparison_for_date, args=(data.get('date'),), daemon=True).start()
     return jsonify({"status": "ok", "message": "Comparison build started in background"})
 
 
 @app.route('/api/comparison/outcomes', methods=['POST'])
 def comparison_outcomes():
-    data      = request.json or {}
-    game_date = data.get('date', None)
-    threading.Thread(target=record_outcomes, args=(game_date,), daemon=True).start()
+    data = request.json or {}
+    threading.Thread(target=record_outcomes, args=(data.get('date'),), daemon=True).start()
     return jsonify({"status": "ok", "message": "Outcomes recording started in background"})
 
 
