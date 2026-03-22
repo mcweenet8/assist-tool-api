@@ -305,16 +305,41 @@ def sm_today_context():
 
                     broad = BROAD_MAP.get(pos_code, "MID")
                     broad_data = opponent_mults["broad"].get(broad, {})
-                    flag = broad_data.get("flag")
-                    if not flag: continue
 
                     assist_mult = broad_data.get("assist_multiplier", 1.0)
                     goal_mult   = broad_data.get("goal_multiplier", 1.0)
-                    mult        = round(max(assist_mult, goal_mult), 2)
+
+                    # Derive separate flags for assist and goal
+                    def _flag(mult):
+                        if mult >= THRESHOLD_HIGH:   return "HIGH"
+                        if mult >= THRESHOLD_MEDIUM: return "MEDIUM"
+                        return None
+
+                    assist_flag = _flag(assist_mult)
+                    goal_flag   = _flag(goal_mult)
+
+                    # Also check absolute thresholds per broad position
+                    gpg = broad_data.get("goals_conceded", 0) / max(broad_data.get("games_played", 1), 1) if broad_data.get("games_played") else 0
+                    apg = broad_data.get("assists_conceded", 0) / max(broad_data.get("games_played", 1), 1) if broad_data.get("games_played") else 0
+
+                    if not assist_flag and apg >= ABS_ASSIST_THRESH.get(broad, 99):
+                        assist_flag = "HIGH"
+                    if not goal_flag and gpg >= ABS_GOAL_THRESH.get(broad, 99):
+                        goal_flag = "HIGH"
+
+                    if not assist_flag and not goal_flag: continue
+
+                    # Overall flag = highest of the two (backwards compat)
+                    overall_flag = "HIGH" if (assist_flag == "HIGH" or goal_flag == "HIGH") else "MEDIUM"
+                    overall_mult = round(max(assist_mult, goal_mult), 2)
 
                     context_map[pid] = {
-                        "concession_flag":       flag,
-                        "concession_multiplier": mult,
+                        "concession_flag":       overall_flag,
+                        "concession_multiplier": overall_mult,
+                        "assist_flag":           assist_flag,
+                        "assist_multiplier":     round(assist_mult, 2),
+                        "goal_flag":             goal_flag,
+                        "goal_multiplier":       round(goal_mult, 2),
                         "opponent_id":           opponent_id,
                         "fixture_id":            fixture_id,
                     }
