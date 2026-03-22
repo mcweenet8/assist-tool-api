@@ -762,18 +762,63 @@ def nightly_run():
                     })
 
         summary["fixtures_found"] = len(today_fixtures)
-        log.info(f"Nightly: {len(today_fixtures)} completed fixtures for {today}")
+        log.info(f"Nightly: {len(today_fixtures)} completed fixtures from cache for {today}")
+
+        # If cache is empty, fetch directly from SM
+        if not today_fixtures:
+            log.info("Nightly: cache empty, fetching fixtures directly from SM...")
+            try:
+                for league_id, info in LEAGUE_MAP.items():
+                    r = req.get(
+                        f"{sm}/fixtures/between/{today}/{today}",
+                        params={"api_token": token, "filters": f"fixtureLeagues:{league_id}", "per_page": 25},
+                        timeout=15
+                    )
+                    for f in r.json().get("data", []):
+                        if f.get("state_id") == 5 and f.get("season_id") == info["season_id"]:
+                            participants = f.get("participants", {})
+                            if isinstance(participants, dict): participants = participants.get("data", [])
+                            home_id = away_id = None
+                            for p in participants:
+                                loc = p.get("meta", {}).get("location", "")
+                                if loc == "home": home_id = p.get("id")
+                                elif loc == "away": away_id = p.get("id")
+                            today_fixtures.append({
+                                "match_id":  f["id"],
+                                "home_id":   str(home_id) if home_id else None,
+                                "away_id":   str(away_id) if away_id else None,
+                                "home":      f.get("name","").split(" vs ")[0],
+                                "away":      f.get("name","").split(" vs ")[-1],
+                                "league_id": league_id,
+                                "season_id": info["season_id"],
+                                "finished":  True,
+                            })
+                    import time as _t; _t.sleep(0.3)
+                log.info(f"Nightly: {len(today_fixtures)} completed fixtures from SM direct")
+            except Exception as e:
+                log.error(f"Nightly SM direct fetch error: {e}")
+                summary["errors"].append(f"fixtures_fetch:{str(e)}")
+
+        summary["fixtures_found"] = len(today_fixtures)
 
         if not today_fixtures:
-            log.info("Nightly: no completed fixtures, exiting")
+            log.info("Nightly: no completed fixtures found, exiting")
             _cache["nightly_last_run"] = today
             _cache["nightly_summary"]  = summary
             return
 
-        # Get season scores for player lookup
-        season_data    = _cache.get("season_scores", {})
-        all_players    = season_data.get("players", [])
-        player_lookup  = {p["player_id"]: p for p in all_players if p.get("player_id")}
+        # Get season scores for player lookup — fetch directly if cache empty
+        season_data = _cache.get("season_scores", {})
+        if not season_data.get("players"):
+            log.info("Nightly: season scores cache empty, fetching...")
+            try:
+                season_data = get_season_scores()
+                _cache["season_scores"] = season_data
+            except Exception as e:
+                log.error(f"Nightly season scores fetch error: {e}")
+                season_data = {}
+        all_players   = season_data.get("players", [])
+        player_lookup = {p["player_id"]: p for p in all_players if p.get("player_id")}
 
         # ── Step 2: Match log collection ──────────────────────────────────────
         log.info("Nightly: collecting match logs...")
