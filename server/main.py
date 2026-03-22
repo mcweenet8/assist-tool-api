@@ -248,6 +248,44 @@ def sm_today_context():
 
         log.info(f"today-context: {len(today_fixtures)} fixtures found")
 
+        # Fetch lineups + sidelined per fixture from SM
+        SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN")
+        fixture_availability = {}  # fixture_id -> {confirmed, starters, sidelined}
+
+        for fixture in today_fixtures:
+            fid = fixture.get("match_id")
+            if not fid: continue
+            try:
+                r = requests.get(
+                    f"https://api.sportmonks.com/v3/football/fixtures/{fid}",
+                    params={"api_token": SPORTMONKS_TOKEN, "include": "lineups;sidelined"},
+                    timeout=10
+                )
+                data = r.json().get("data", {})
+
+                lineups = data.get("lineups", [])
+                if isinstance(lineups, dict): lineups = lineups.get("data", [])
+
+                sidelined = data.get("sidelined", [])
+                if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
+
+                confirmed  = any(p.get("formation_field") for p in lineups)
+                starters   = {p["player_id"] for p in lineups if p.get("type_id") == 11}
+                sidelined_ids = {p["player_id"] for p in sidelined}
+
+                fixture_availability[str(fid)] = {
+                    "confirmed":  confirmed,
+                    "starters":   list(starters),
+                    "sidelined":  list(sidelined_ids),
+                }
+            except Exception as e:
+                log.warning(f"Lineup/sidelined fetch failed for fixture {fid}: {e}")
+                fixture_availability[str(fid)] = {
+                    "confirmed": False,
+                    "starters":  [],
+                    "sidelined": [],
+                }
+
         # Build multipliers per team per season inline
         def get_team_multipliers(team_id, season_id):
             result = {"broad": {}}
@@ -350,7 +388,20 @@ def sm_today_context():
                     }
 
         log.info(f"today-context: {len(today_fixtures)} fixtures, {len(context_map)} flagged players")
-        return jsonify({"context": context_map, "count": len(context_map)})
+
+        # Build team -> fixture map for availability lookup
+        team_to_fixture = {}
+        for fixture in today_fixtures:
+            fid = str(fixture.get("match_id",""))
+            if fixture.get("home_id"): team_to_fixture[str(fixture["home_id"])] = fid
+            if fixture.get("away_id"): team_to_fixture[str(fixture["away_id"])] = fid
+
+        return jsonify({
+            "context":              context_map,
+            "count":                len(context_map),
+            "fixture_availability": fixture_availability,
+            "team_to_fixture":      team_to_fixture,
+        })
 
     except Exception as e:
         log.error(f"today-context error: {e}")
