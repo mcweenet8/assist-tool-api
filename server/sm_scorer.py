@@ -307,8 +307,6 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
             "assist_index":          assist_index,
             "goal_score":            goal_score,
             "tsoa":                  tsoa,
-            "concession_flag":       concession_flag,
-            "concession_multiplier": concession_multiplier,
             "assist_grade":          grade_color(assist_index or 0),
             "goal_grade":            grade_color(goal_score or 0),
             "tsoa_grade":            grade_color(tsoa or 0),
