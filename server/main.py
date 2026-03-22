@@ -300,7 +300,12 @@ def sm_today_context():
                 for player in team_players:
                     pid          = str(player.get("player_id"))
                     detailed_pos = player.get("detailed_position_id")
+                    position_id  = player.get("position_id")
                     pos_code     = GRANULAR_POSITION_MAP.get(detailed_pos, (None, None))[0]
+                    if not pos_code and position_id:
+                        # Fallback to broad position
+                        _broad = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
+                        pos_code = _broad
                     if not pos_code: continue
 
                     broad = BROAD_MAP.get(pos_code, "MID")
@@ -1026,8 +1031,11 @@ def nightly_run():
                         if not flag: continue
                         for p in today_players:
                             if str(p.get("team_id")) != str(team_id): continue
-                            dp = p.get("detailed_position_id")
-                            pc = GPM.get(dp, (None,None))[0]
+                            dp  = p.get("detailed_position_id")
+                            pid_pos = p.get("position_id")
+                            pc  = GPM.get(dp, (None,None))[0]
+                            if not pc and pid_pos:
+                                pc = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(pid_pos)
                             if not pc: continue
                             if BM.get(pc,"MID") == bp:
                                 nightly_context[str(p["player_id"])] = {"concession_flag": flag}
