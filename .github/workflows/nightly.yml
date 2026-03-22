@@ -1,0 +1,16 @@
+name: Nightly Pipeline
+
+on:
+  schedule:
+    - cron: '0 23 * * *'  # 11pm UTC daily
+  workflow_dispatch:        # allows manual trigger from GitHub Actions tab
+
+jobs:
+  run-nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger nightly pipeline
+        run: |
+          curl -X POST https://web-production-0e482.up.railway.app/api/nightly/run
+          sleep 10
+          curl https://web-production-0e482.up.railway.app/api/nightly/status
