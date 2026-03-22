@@ -28,23 +28,24 @@ BROAD_POSITION_MAP = {
 }
 
 GRANULAR_POSITION_MAP = {
+    24:  ("GK",  "GK"),
     144: ("GK",  "GK"),
-    148: ("CB",  "DEF"), 149: ("RB",  "DEF"), 150: ("LB",  "DEF"),
-    151: ("RWB", "DEF"), 152: ("LWB", "DEF"),
-    153: ("CDM", "MID"), 154: ("CM",  "MID"), 155: ("CAM", "MID"),
-    156: ("RM",  "MID"), 157: ("LM",  "MID"),
-    158: ("RW",  "FWD"), 159: ("LW",  "FWD"), 160: ("ST",  "FWD"),
-    161: ("CF",  "FWD"), 162: ("SS",  "FWD"),
+    148: ("DEF", "DEF"), 154: ("DEF", "DEF"), 155: ("DEF", "DEF"),
+    149: ("MID", "MID"), 150: ("MID", "MID"), 153: ("MID", "MID"),
+    157: ("MID", "MID"), 158: ("MID", "MID"),
+    151: ("FWD", "FWD"), 152: ("FWD", "FWD"), 156: ("FWD", "FWD"),
+    159: ("FWD", "FWD"), 160: ("FWD", "FWD"), 161: ("FWD", "FWD"),
+    162: ("FWD", "FWD"), 163: ("FWD", "FWD"),
 }
 
 THRESHOLD_HIGH   = 2.0
 THRESHOLD_MEDIUM = 1.5
 
 BROAD_MAP = {
-    "GK": "GK",
-    "CB": "DEF", "RB": "DEF", "LB": "DEF", "RWB": "DEF", "LWB": "DEF",
-    "CDM": "MID", "CM": "MID", "CAM": "MID", "RM": "MID", "LM": "MID",
-    "RW": "FWD", "LW": "FWD", "ST": "FWD", "CF": "FWD", "SS": "FWD",
+    "GK":  "GK",
+    "DEF": "DEF",
+    "MID": "MID",
+    "FWD": "FWD",
 }
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
