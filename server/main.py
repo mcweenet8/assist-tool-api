@@ -82,7 +82,8 @@ def _refresh_lineup_availability():
                         continue
 
                     try:
-                        r = requests.get(
+                        import requests as _req_bg
+                        r = _req_bg.get(
                             f"https://api.sportmonks.com/v3/football/fixtures/{fid}",
                             params={"api_token": token, "include": "lineups;sidelined"},
                             timeout=15
@@ -119,7 +120,7 @@ def _refresh_lineup_availability():
 
         _time.sleep(300)  # refresh every 5 minutes
 
-threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
+# threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
 
 
 # ── Health / version ──────────────────────────────────────────────────────────
