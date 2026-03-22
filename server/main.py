@@ -701,8 +701,11 @@ def sm_lineups_today():
     if not fixtures or not token:
         return jsonify({"fixture_availability": {}, "error": "no fixtures or token"})
 
-    now_utc   = datetime.now(pytz.utc)
-    today_str = now_utc.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+    import requests as _req
+    import pytz as _pytz
+
+    now_utc   = datetime.now(_pytz.utc)
+    today_str = now_utc.astimezone(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
     availability = dict(cached)
 
     # Find today's active fixtures
@@ -718,8 +721,8 @@ def sm_lineups_today():
 
             try:
                 ko_dt      = datetime.fromisoformat(ko.replace("Z", "+00:00"))
-                local_date = ko_dt.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
-                mins_to_ko = (ko_dt.replace(tzinfo=pytz.utc) - now_utc).total_seconds() / 60
+                local_date = ko_dt.astimezone(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+                mins_to_ko = (ko_dt.replace(tzinfo=_pytz.utc) - now_utc).total_seconds() / 60
             except:
                 continue
 
@@ -734,7 +737,7 @@ def sm_lineups_today():
     # Fetch lineups sequentially for active fixtures
     for fid in active_fids:
         try:
-            r = requests.get(
+            r = _req.get(
                 f"https://api.sportmonks.com/v3/football/fixtures/{fid}",
                 params={"api_token": token, "include": "lineups;sidelined"},
                 timeout=15
