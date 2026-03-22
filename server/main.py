@@ -70,7 +70,7 @@ def fixtures():
     if not cached:
         def bg():
             try:
-                f = get_sm_fixtures(days=7)
+                f = get_sm_fixtures(days=14)
                 _cache["fixtures"] = f
                 _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 _cache["status"] = "ok"
@@ -98,7 +98,7 @@ def refresh():
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
             log.info("SM fixtures refresh starting...")
-            fix = get_sm_fixtures(days=7)
+            fix = get_sm_fixtures(days=14)
             _cache["fixtures"] = fix
             _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info(f"SM fixtures: {sum(len(v) for v in fix.values())} total")
@@ -458,7 +458,7 @@ def sm_refresh_today():
         score_todays_fixtures()
         build_comparison_for_date()
         try:
-            fix = get_sm_fixtures(days=7)
+            fix = get_sm_fixtures(days=14)
             _cache["fixtures"] = fix
             _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         except Exception as e:
