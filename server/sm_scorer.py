@@ -606,6 +606,8 @@ def get_season_scores():
                 "baseline_cross_per90": cross_per90,
                 "baseline_sot_per90":   sot_per90,
                 "data_source":          "season_baseline",
+                "detailed_position_id": row.get("detailed_position_id"),
+                "position_id":          row.get("position_id"),
             })
 
         players.sort(key=lambda p: p.get("tsoa_score") or 0, reverse=True)
