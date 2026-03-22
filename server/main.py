@@ -424,14 +424,40 @@ def sm_results():
 
             def top_n_rate(lst, n=20):
                 if not lst: return None
-                return round(sum(1 for r in lst if r <= n) / len(lst), 2)
+                return round(sum(1 for r in lst if r <= n) / n, 2)
+
+            def top_n_count(lst, n):
+                return sum(1 for r in lst if r <= n)
+
+            total_contributors = len(contributors)
 
             summaries[date] = {
                 "total_fixtures":     len(set(r["fixture_id"] for r in date_rows)),
-                "total_contributors": len(contributors),
-                "assist": {"median_rank": median(assist_ranks), "top20_rate": top_n_rate(assist_ranks), "top20_count": sum(1 for r in assist_ranks if r <= 20), "total": len(assist_ranks)},
-                "goal":   {"median_rank": median(goal_ranks),   "top20_rate": top_n_rate(goal_ranks),   "top20_count": sum(1 for r in goal_ranks   if r <= 20), "total": len(goal_ranks)},
-                "tsoa":   {"median_rank": median(tsoa_ranks),   "top20_rate": top_n_rate(tsoa_ranks),   "top20_count": sum(1 for r in tsoa_ranks   if r <= 20), "total": len(tsoa_ranks)},
+                "total_contributors": total_contributors,
+                "assist": {
+                    "median_rank":   median(assist_ranks),
+                    "top20_rate":    top_n_rate(assist_ranks),
+                    "top20_count":   top_n_count(assist_ranks, 20),
+                    "top100_count":  top_n_count(assist_ranks, 100),
+                    "outside_count": total_contributors - top_n_count(assist_ranks, 100),
+                    "total":         total_contributors,
+                },
+                "goal": {
+                    "median_rank":   median(goal_ranks),
+                    "top20_rate":    top_n_rate(goal_ranks),
+                    "top20_count":   top_n_count(goal_ranks, 20),
+                    "top100_count":  top_n_count(goal_ranks, 100),
+                    "outside_count": total_contributors - top_n_count(goal_ranks, 100),
+                    "total":         total_contributors,
+                },
+                "tsoa": {
+                    "median_rank":   median(tsoa_ranks),
+                    "top20_rate":    top_n_rate(tsoa_ranks),
+                    "top20_count":   top_n_count(tsoa_ranks, 20),
+                    "top100_count":  top_n_count(tsoa_ranks, 100),
+                    "outside_count": total_contributors - top_n_count(tsoa_ranks, 100),
+                    "total":         total_contributors,
+                },
             }
 
         return jsonify({"results": rows, "dates": sorted(by_date.keys(), reverse=True), "summaries": summaries})
