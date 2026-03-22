@@ -268,7 +268,10 @@ def score_fixture(fixture_id, season_id, league_id, game_date=None):
         opponent_mults   = concession_mults.get(opponent_team_id, {}) if opponent_team_id else {}
 
         detailed_pos_id = baseline.get("detailed_position_id")
+        position_id     = baseline.get("position_id")
         pos_code = GRANULAR_POSITION_MAP.get(detailed_pos_id, (None, None))[0]
+        if not pos_code and position_id:
+            pos_code = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
 
         concession_flag       = None
         concession_multiplier = 1.0
