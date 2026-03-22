@@ -178,31 +178,30 @@ def get_sm_fixtures(days=7):
     fixtures_by_league = {ln: [] for ln in SM_LEAGUES}
 
     today = datetime.utcnow()
-    dates = [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(-2, days)]
+    start_date = (today - timedelta(days=2)).strftime("%Y-%m-%d")
+    end_date   = (today + timedelta(days=days)).strftime("%Y-%m-%d")
 
     for league_name, config in SM_LEAGUES.items():
         league_id = config["league_id"]
+        try:
+            resp = _sm_get(
+                endpoint=f"/fixtures/between/{start_date}/{end_date}",
+                filters=f"fixtureLeagues:{league_id}",
+                include="participants;scores;periods;state",
+            )
+            raw_fixtures = resp.get("data", [])
+            if isinstance(raw_fixtures, dict):
+                raw_fixtures = raw_fixtures.get("data", [])
 
-        for iso_date in dates:
-            try:
-                resp = _sm_get(
-                    endpoint=f"/fixtures/between/{iso_date}/{iso_date}",
-                    filters=f"fixtureLeagues:{league_id}",
-                    include="participants;scores;periods;state",
-                )
-                raw_fixtures = resp.get("data", [])
-                if isinstance(raw_fixtures, dict):
-                    raw_fixtures = raw_fixtures.get("data", [])
+            for raw in raw_fixtures:
+                parsed = _parse_fixture(raw, league_name)
+                if parsed:
+                    fixtures_by_league[league_name].append(parsed)
 
-                for raw in raw_fixtures:
-                    parsed = _parse_fixture(raw, league_name)
-                    if parsed:
-                        fixtures_by_league[league_name].append(parsed)
+        except Exception as e:
+            log.error(f"SM fixtures {league_name}: {e}")
 
-            except Exception as e:
-                log.error(f"SM fixtures {league_name} {iso_date}: {e}")
-
-            time.sleep(0.3)  # avoid rate limit burst
+        time.sleep(0.5)
 
     for ln in fixtures_by_league:
         fixtures_by_league[ln].sort(key=lambda x: x.get("kickoff", "") or "")
