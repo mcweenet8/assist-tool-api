@@ -38,6 +38,87 @@ def _prewarm_cache():
 threading.Thread(target=_prewarm_cache, daemon=True).start()
 
 
+def _refresh_lineup_availability():
+    """Background thread — refreshes lineup/sidelined availability every 5 minutes."""
+    import time as _time
+    import pytz as _pytz
+
+    LIVE_STATES     = {2,3,4,6,7,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25}
+    FINISHED_STATES = {5}
+
+    while True:
+        try:
+            fixtures  = _cache.get("fixtures", {})
+            token     = os.environ.get("SPORTMONKS_API_TOKEN")
+            if not fixtures or not token:
+                _time.sleep(60)
+                continue
+
+            now_utc   = datetime.now(_pytz.utc)
+            today_str = now_utc.astimezone(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+            availability = dict(_cache.get("lineup_availability", {}))
+
+            for league_matches in fixtures.values():
+                for m in league_matches:
+                    ko  = m.get("kickoff", "")
+                    fid = str(m.get("match_id", ""))
+                    if not fid or not ko: continue
+
+                    is_live     = m.get("live", False)
+                    is_finished = m.get("finished", False)
+
+                    # Check kickoff date
+                    try:
+                        ko_dt      = datetime.fromisoformat(ko.replace("Z", "+00:00"))
+                        local_date = ko_dt.astimezone(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+                        mins_to_ko = (ko_dt.replace(tzinfo=_pytz.utc) - now_utc).total_seconds() / 60
+                    except:
+                        continue
+
+                    if local_date != today_str: continue
+
+                    is_active = is_live or is_finished or (-60 <= mins_to_ko <= 120)
+                    if not is_active:
+                        availability[fid] = {"confirmed": False, "starters": [], "sidelined": []}
+                        continue
+
+                    try:
+                        r = requests.get(
+                            f"https://api.sportmonks.com/v3/football/fixtures/{fid}",
+                            params={"api_token": token, "include": "lineups;sidelined"},
+                            timeout=15
+                        )
+                        data     = r.json().get("data", {})
+                        lineups  = data.get("lineups", [])
+                        if isinstance(lineups, dict): lineups = lineups.get("data", [])
+                        sidelined = data.get("sidelined", [])
+                        if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
+
+                        confirmed = any(p.get("formation_field") for p in lineups)
+                        starters  = [p["player_id"] for p in lineups if p.get("type_id") == 11]
+                        sidelined_ids = [p["player_id"] for p in sidelined]
+
+                        availability[fid] = {
+                            "confirmed": confirmed,
+                            "starters":  starters,
+                            "sidelined": sidelined_ids,
+                        }
+                        log.info(f"Lineup refresh {fid}: confirmed={confirmed} starters={len(starters)}")
+                        _time.sleep(0.5)
+                    except Exception as e:
+                        log.warning(f"Lineup fetch error {fid}: {e}")
+
+            _cache["lineup_availability"] = availability
+            _cache["lineup_availability_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        except Exception as e:
+            log.error(f"Lineup refresh thread error: {e}")
+
+        _time.sleep(300)  # refresh every 5 minutes
+
+threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
+
+
 # ── Health / version ──────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -248,69 +329,16 @@ def sm_today_context():
 
         log.info(f"today-context: {len(today_fixtures)} fixtures found")
 
-        # Fetch lineups + sidelined per fixture from SM
-        # Only fetch for live/finished fixtures — upcoming ones won't have confirmed lineups
-        SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN")
+        # Use pre-cached lineup availability (refreshed every 5min by background thread)
         fixture_availability = {}
-
-        LIVE_STATES     = {2,3,4,6,7,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25}
-        FINISHED_STATES = {5}
-
+        cached_avail = _cache.get("lineup_availability", {})
         for fixture in today_fixtures:
-            fid      = fixture.get("match_id")
-            state_id = fixture.get("state_id")
+            fid = str(fixture.get("match_id", ""))
             if not fid: continue
-
-            # Default to unconfirmed for upcoming fixtures
-            is_live     = fixture.get("live", False)
-            is_finished = fixture.get("finished", False) or state_id in FINISHED_STATES
-            is_active   = is_live or is_finished or state_id in LIVE_STATES
-
-            # Also fetch for scheduled fixtures within 2 hours of kickoff
-            if not is_active:
-                ko = fixture.get("kickoff", "")
-                if ko:
-                    try:
-                        import pytz as _pytz
-                        ko_dt    = datetime.fromisoformat(ko.replace("Z", "+00:00"))
-                        now_utc  = datetime.now(_pytz.utc)
-                        mins_to_ko = (ko_dt.replace(tzinfo=_pytz.utc) - now_utc).total_seconds() / 60
-                        if -60 <= mins_to_ko <= 120:  # within 2hrs before or after kickoff
-                            is_active = True
-                    except:
-                        pass
-
-            if not is_active:
-                fixture_availability[str(fid)] = {"confirmed": False, "starters": [], "sidelined": []}
-                continue
-
-            try:
-                r = requests.get(
-                    f"https://api.sportmonks.com/v3/football/fixtures/{fid}",
-                    params={"api_token": SPORTMONKS_TOKEN, "include": "lineups;sidelined"},
-                    timeout=10
-                )
-                data = r.json().get("data", {})
-
-                lineups = data.get("lineups", [])
-                if isinstance(lineups, dict): lineups = lineups.get("data", [])
-
-                sidelined = data.get("sidelined", [])
-                if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
-
-                confirmed     = any(p.get("formation_field") for p in lineups)
-                starters      = {p["player_id"] for p in lineups if p.get("type_id") == 11}
-                sidelined_ids = {p["player_id"] for p in sidelined}
-
-                fixture_availability[str(fid)] = {
-                    "confirmed": confirmed,
-                    "starters":  list(starters),
-                    "sidelined": list(sidelined_ids),
-                }
-                log.info(f"  Fixture {fid} (state {state_id}): confirmed={confirmed} starters={len(starters)} sidelined={len(sidelined_ids)}")
-            except Exception as e:
-                log.warning(f"Lineup/sidelined fetch failed for fixture {fid}: {e}")
-                fixture_availability[str(fid)] = {"confirmed": False, "starters": [], "sidelined": []}
+            if fid in cached_avail:
+                fixture_availability[fid] = cached_avail[fid]
+            else:
+                fixture_availability[fid] = {"confirmed": False, "starters": [], "sidelined": []}
 
         # Build multipliers per team per season inline
         def get_team_multipliers(team_id, season_id):
