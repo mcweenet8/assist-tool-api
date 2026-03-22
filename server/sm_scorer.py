@@ -28,12 +28,12 @@ ASSIST_WEIGHTS = {
 }
 
 GOAL_WEIGHTS = {
-    "sot_per90": 0.70,
-    "goals_p90": 0.30,
+    "sot_ratio":   0.55,
+    "goals_ratio": 0.45,
 }
 
-ASSIST_SCALE = 1.5
-GOAL_SCALE   = 2.45
+ASSIST_SCALE = 1.35
+GOAL_SCALE   = 1.0
 
 LEAGUE_NAMES = {
     8:    "Premier League",
@@ -537,32 +537,27 @@ def get_season_scores():
             cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
             pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
             sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
+            goals_ratio = goals_per90 / avgs.get("goals_per90", 0.001)
             bc_per90    = row.get("big_chances_per90") or 0
             bc_ratio    = bc_per90    / avgs.get("bc_per90",    0.001)
             cca_val     = cca_map.get(row.get("player_id"), 0) or 0
             cca_ratio   = cca_val     / avgs.get("cca",          0.001)
 
-            # DC Assist Index with conversion rate modifier
-            assist_index_raw = (
+            # DC Assist Index — pure ratio weighted average, no conversion modifier
+            assist_index = round((
                 kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
                 cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
                 bc_ratio    * ASSIST_WEIGHTS["bc_ratio"] +
                 pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"] +
                 cca_ratio   * ASSIST_WEIGHTS["cca_ratio"]
-            )
-            conv_mod = _conversion_modifier(
-                row.get("assists_total") or 0,
-                row.get("key_passes_total") or 0,
-                avgs.get("conversion", 0.001)
-            )
-            assist_index = round(assist_index_raw * conv_mod * ASSIST_SCALE, 4)
+            ), 4)
 
-            # DC Goal Score
-            goal_score_raw = (
-                sot_per90   * GOAL_WEIGHTS["sot_per90"] +
-                goals_per90 * GOAL_WEIGHTS["goals_p90"]
-            )
-            goal_score = round(goal_score_raw * GOAL_SCALE, 4)
+            # DC Goal Score — league-normalized ratios
+            goal_score = round((
+                sot_ratio   * GOAL_WEIGHTS["sot_ratio"] +
+                goals_ratio * GOAL_WEIGHTS["goals_ratio"] +
+                bc_ratio    * GOAL_WEIGHTS["bc_ratio"]
+            ), 4)
 
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
 
@@ -591,7 +586,9 @@ def get_season_scores():
                 "cross_ratio":          round(cross_ratio, 3),
                 "bc_ratio":             round(bc_ratio, 3),
                 "pass_acc_ratio":       round(pa_ratio, 3),
-                "conversion_modifier":  conv_mod,
+                "conversion_modifier":  1.0,
+                "sot_ratio":            round(sot_ratio, 3),
+                "goals_ratio":          round(goals_ratio, 3),
                 "cca_per_fixture":      round(cca_val, 4),
                 "cca_ratio":            round(cca_ratio, 3),
                 "assist_index":         assist_index,
