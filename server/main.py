@@ -152,16 +152,21 @@ def version():
 def fixtures():
     cached = _cache.get("fixtures")
     if not cached:
-        def bg():
-            try:
-                f = get_sm_fixtures(days=7)
-                _cache["fixtures"] = f
-                _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                _cache["status"] = "ok"
-                _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            except Exception as e:
-                log.error(f"bg fixtures: {e}")
-        threading.Thread(target=bg, daemon=True).start()
+        # Only start a background fetch if one isn't already running
+        if not _cache.get("fixtures_loading"):
+            _cache["fixtures_loading"] = True
+            def bg():
+                try:
+                    f = get_sm_fixtures(days=7)
+                    _cache["fixtures"] = f
+                    _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    _cache["status"] = "ok"
+                    _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                except Exception as e:
+                    log.error(f"bg fixtures: {e}")
+                finally:
+                    _cache["fixtures_loading"] = False
+            threading.Thread(target=bg, daemon=True).start()
         return jsonify({"fixtures": {}, "last_updated": "", "loading": True})
     return jsonify({
         "last_updated": _cache.get("fixtures_last_updated", _cache.get("last_updated", "")),
@@ -182,10 +187,17 @@ def refresh():
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
             log.info("SM fixtures refresh starting...")
-            fix = get_sm_fixtures(days=7)
-            _cache["fixtures"] = fix
-            _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            log.info(f"SM fixtures: {sum(len(v) for v in fix.values())} total")
+            if not _cache.get("fixtures_loading"):
+                _cache["fixtures_loading"] = True
+                try:
+                    fix = get_sm_fixtures(days=7)
+                    _cache["fixtures"] = fix
+                    _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    log.info(f"SM fixtures: {sum(len(v) for v in fix.values())} total")
+                finally:
+                    _cache["fixtures_loading"] = False
+            else:
+                log.info("SM fixtures already loading — skipping duplicate fetch")
 
             score_todays_fixtures()
             build_comparison_for_date()
@@ -514,12 +526,16 @@ def sm_refresh_today():
     def run():
         score_todays_fixtures()
         build_comparison_for_date()
-        try:
-            fix = get_sm_fixtures(days=7)
-            _cache["fixtures"] = fix
-            _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        except Exception as e:
-            log.error(f"SM refresh-today fixtures: {e}")
+        if not _cache.get("fixtures_loading"):
+            _cache["fixtures_loading"] = True
+            try:
+                fix = get_sm_fixtures(days=7)
+                _cache["fixtures"] = fix
+                _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            except Exception as e:
+                log.error(f"SM refresh-today fixtures: {e}")
+            finally:
+                _cache["fixtures_loading"] = False
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"status": "ok", "message": "SM refresh started in background"})
 
@@ -724,7 +740,12 @@ def sm_lineups_today():
                 timeout=15
             )
             if r.status_code == 429:
-                log.warning(f"Lineup fetch rate limited for {fid}")
+                log.warning(f"Lineup fetch rate limited for {fid} — stopping")
+                break
+            # Check remaining calls from headers
+            remaining = int(r.headers.get("x-ratelimit-remaining", 999))
+            if remaining < 50:
+                log.warning(f"Rate limit low ({remaining}) — stopping lineup fetch")
                 break
             data      = r.json().get("data", {})
             lineups   = data.get("lineups", [])
