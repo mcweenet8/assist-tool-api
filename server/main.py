@@ -246,7 +246,7 @@ def sm_today_context():
             for row in rows:
                 broad_map[(row["team_id"], sid, row["broad_position"])] = row
 
-        log.info(f"today-context: {len(today_fixtures)} fixtures, {len(context)} flagged players")
+        log.info(f"today-context: {len(today_fixtures)} fixtures found")
 
         # Build multipliers per team per season inline
         def get_team_multipliers(team_id, season_id):
