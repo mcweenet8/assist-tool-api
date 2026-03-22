@@ -281,7 +281,7 @@ def sm_today_context():
                 }
             return result
 
-        context = {}
+        context_map = {}
 
         for fixture in today_fixtures:
             home_id    = fixture.get("home_id")
@@ -312,14 +312,15 @@ def sm_today_context():
                     goal_mult   = broad_data.get("goal_multiplier", 1.0)
                     mult        = round(max(assist_mult, goal_mult), 2)
 
-                    context[pid] = {
+                    context_map[pid] = {
                         "concession_flag":       flag,
                         "concession_multiplier": mult,
                         "opponent_id":           opponent_id,
                         "fixture_id":            fixture_id,
                     }
 
-        return jsonify({"context": context, "count": len(context)})
+        log.info(f"today-context: {len(today_fixtures)} fixtures, {len(context_map)} flagged players")
+        return jsonify({"context": context_map, "count": len(context_map)})
 
     except Exception as e:
         log.error(f"today-context error: {e}")
