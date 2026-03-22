@@ -24,7 +24,7 @@ SM_LEAGUES = {
 LIVE_STATES      = {2, 3, 4, 6, 7, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}
 FINISHED_STATES  = {5}
 SCHEDULED_STATES = {1}
-SKIP_STATES      = {9}
+SKIP_STATES      = {9, 10}
 
 # State labels for display — covers both old and new SM state IDs
 STATE_LABELS = {
