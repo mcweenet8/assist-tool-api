@@ -43,8 +43,8 @@ def _refresh_lineup_availability():
     import time as _time
     import pytz as _pytz
 
-    LIVE_STATES     = {2,3,4,6,7,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25}
-    FINISHED_STATES = {5}
+    # Wait 90 seconds on startup to let fixtures load first
+    _time.sleep(90)
 
     while True:
         try:
@@ -67,7 +67,6 @@ def _refresh_lineup_availability():
                     is_live     = m.get("live", False)
                     is_finished = m.get("finished", False)
 
-                    # Check kickoff date
                     try:
                         ko_dt      = datetime.fromisoformat(ko.replace("Z", "+00:00"))
                         local_date = ko_dt.astimezone(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
@@ -88,6 +87,10 @@ def _refresh_lineup_availability():
                             params={"api_token": token, "include": "lineups;sidelined"},
                             timeout=15
                         )
+                        if r.status_code == 429:
+                            log.warning(f"Lineup refresh rate limited, sleeping 30s")
+                            _time.sleep(30)
+                            continue
                         data     = r.json().get("data", {})
                         lineups  = data.get("lineups", [])
                         if isinstance(lineups, dict): lineups = lineups.get("data", [])
@@ -104,7 +107,7 @@ def _refresh_lineup_availability():
                             "sidelined": sidelined_ids,
                         }
                         log.info(f"Lineup refresh {fid}: confirmed={confirmed} starters={len(starters)}")
-                        _time.sleep(0.5)
+                        _time.sleep(1.0)  # 1 second between calls to avoid rate limiting
                     except Exception as e:
                         log.warning(f"Lineup fetch error {fid}: {e}")
 
@@ -116,7 +119,7 @@ def _refresh_lineup_availability():
 
         _time.sleep(300)  # refresh every 5 minutes
 
-# threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
+threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
 
 
 # ── Health / version ──────────────────────────────────────────────────────────
@@ -151,7 +154,7 @@ def fixtures():
     if not cached:
         def bg():
             try:
-                f = get_sm_fixtures(days=14)
+                f = get_sm_fixtures(days=7)
                 _cache["fixtures"] = f
                 _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 _cache["status"] = "ok"
@@ -179,7 +182,7 @@ def refresh():
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
             log.info("SM fixtures refresh starting...")
-            fix = get_sm_fixtures(days=14)
+            fix = get_sm_fixtures(days=7)
             _cache["fixtures"] = fix
             _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             log.info(f"SM fixtures: {sum(len(v) for v in fix.values())} total")
@@ -512,7 +515,7 @@ def sm_refresh_today():
         score_todays_fixtures()
         build_comparison_for_date()
         try:
-            fix = get_sm_fixtures(days=14)
+            fix = get_sm_fixtures(days=7)
             _cache["fixtures"] = fix
             _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         except Exception as e:
@@ -547,10 +550,17 @@ def sm_results():
 
         summaries = {}
         for date, date_rows in by_date.items():
-            contributors = [r for r in date_rows if r.get("had_contribution")]
+            # Exclude DNPs from all calculations
+            played    = [r for r in date_rows if not r.get("dnp")]
+            contributors = [r for r in played if r.get("had_contribution")]
             assist_ranks = [r["sm_assist_rank"] for r in contributors if r.get("sm_assist_rank")]
             goal_ranks   = [r["sm_goal_rank"]   for r in contributors if r.get("sm_goal_rank")]
             tsoa_ranks   = [r["sm_tsoa_rank"]   for r in contributors if r.get("sm_tsoa_rank")]
+
+            # Count DNPs that were in our top 20 — shown separately for transparency
+            dnp_rows = [r for r in date_rows if r.get("dnp")]
+            dnp_top20_assist = sum(1 for r in dnp_rows if r.get("sm_assist_rank") and r["sm_assist_rank"] <= 20)
+            dnp_top20_goal   = sum(1 for r in dnp_rows if r.get("sm_goal_rank")   and r["sm_goal_rank"]   <= 20)
 
             def median(lst):
                 return round(statistics.median(lst), 1) if lst else None
@@ -567,6 +577,7 @@ def sm_results():
             summaries[date] = {
                 "total_fixtures":     len(set(r["fixture_id"] for r in date_rows)),
                 "total_contributors": total_contributors,
+                "dnp_count":          len(dnp_rows),
                 "assist": {
                     "median_rank":   median(assist_ranks),
                     "top20_rate":    top_n_rate(assist_ranks),
@@ -574,6 +585,7 @@ def sm_results():
                     "top100_count":  top_n_count(assist_ranks, 100),
                     "outside_count": total_contributors - top_n_count(assist_ranks, 100),
                     "total":         total_contributors,
+                    "dnp_top20":     dnp_top20_assist,
                 },
                 "goal": {
                     "median_rank":   median(goal_ranks),
@@ -582,6 +594,7 @@ def sm_results():
                     "top100_count":  top_n_count(goal_ranks, 100),
                     "outside_count": total_contributors - top_n_count(goal_ranks, 100),
                     "total":         total_contributors,
+                    "dnp_top20":     dnp_top20_goal,
                 },
                 "tsoa": {
                     "median_rank":   median(tsoa_ranks),
@@ -1180,6 +1193,11 @@ def nightly_run():
                 log.error(f"Nightly outcomes error fixture {fixture_id}: {e}")
                 summary["errors"].append(f"outcomes:{fixture_id}:{str(e)}")
 
+        # Build minutes lookup from match log
+        minutes_lookup = {}
+        for row in match_log_rows:
+            minutes_lookup[row["player_id"]] = row.get("minutes_played", 0)
+
         all_pids      = set(list(actual_goals.keys()) + list(actual_assists.keys()))
         outcome_rows  = []
         for pid in all_pids:
@@ -1187,6 +1205,7 @@ def nightly_run():
             g   = actual_goals.get(pid, 0)
             a   = actual_assists.get(pid, 0)
             ctx = nightly_context.get(str(pid), {})
+            mins = minutes_lookup.get(pid, None)
             outcome_rows.append({
                 "game_date":        today,
                 "fixture_id":       player_fixture.get(pid),
@@ -1204,6 +1223,8 @@ def nightly_run():
                 "actual_goals":     g,
                 "actual_assists":   a,
                 "had_contribution": (g > 0 or a > 0),
+                "minutes_played":   mins,
+                "dnp":              mins is not None and mins == 0,
                 "outcome_recorded": True,
             })
 
