@@ -677,6 +677,422 @@ def comparison_results():
     return jsonify(get_running_totals())
 
 
+# ── Nightly automation ────────────────────────────────────────────────────────
+
+@app.route('/api/nightly/run', methods=['GET', 'POST'])
+def nightly_run():
+    """
+    Nightly pipeline — runs after matches finish.
+    1. Find today's completed fixtures
+    2. Collect match log (player_match_log)
+    3. Record outcomes (sm_matchday_results)
+    4. Update concessions for each new fixture
+    5. Recalculate league averages
+    6. Refresh season scores cache
+    """
+    def run_nightly():
+        import requests as req
+        import pytz
+        from supabase import create_client
+        from collections import defaultdict
+
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+        token  = os.environ.get("SPORTMONKS_API_TOKEN")
+        sm     = "https://api.sportmonks.com/v3/football"
+        today  = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+
+        LEAGUE_MAP = {
+            8:    {"season_id": 25583, "name": "Premier League"},
+            9:    {"season_id": 25648, "name": "Championship"},
+            564:  {"season_id": 25659, "name": "La Liga"},
+            384:  {"season_id": 25533, "name": "Serie A"},
+            82:   {"season_id": 25646, "name": "Bundesliga"},
+            301:  {"season_id": 25651, "name": "Ligue 1"},
+            779:  {"season_id": 26720, "name": "MLS"},
+            1356: {"season_id": 26529, "name": "A-League Men"},
+        }
+        LEAGUE_NAME_MAP = {v["name"]: k for k, v in LEAGUE_MAP.items()}
+
+        MATCH_LOG_TYPES = {
+            119:"minutes_played", 117:"key_passes", 86:"shots_on_target",
+            42:"shots_total", 99:"acc_crosses", 98:"total_crosses",
+            52:"goals", 79:"assists", 580:"big_chances_created",
+            116:"acc_passes", 80:"total_passes", 5304:"xg",
+        }
+
+        BROAD_POSITION_MAP    = {24:"GK", 25:"DEF", 26:"MID", 27:"FWD"}
+        GRANULAR_POSITION_MAP = {
+            144:("GK","GK"),148:("CB","DEF"),149:("RB","DEF"),150:("LB","DEF"),
+            151:("RWB","DEF"),152:("LWB","DEF"),153:("CDM","MID"),154:("CM","MID"),
+            155:("CAM","MID"),156:("RM","MID"),157:("LM","MID"),158:("RW","FWD"),
+            159:("LW","FWD"),160:("ST","FWD"),161:("CF","FWD"),162:("SS","FWD"),
+        }
+
+        summary = {
+            "date":             today,
+            "fixtures_found":   0,
+            "match_log_rows":   0,
+            "outcome_rows":     0,
+            "concessions_updated": 0,
+            "errors":           [],
+        }
+
+        log.info(f"Nightly run starting for {today}")
+
+        # ── Step 1: Find today's completed fixtures ───────────────────────────
+        fixtures = _cache.get("fixtures", {})
+        today_fixtures = []
+        for league_name, matches in fixtures.items():
+            league_id = LEAGUE_NAME_MAP.get(league_name)
+            if not league_id: continue
+            season_id = LEAGUE_MAP[league_id]["season_id"]
+            for m in matches:
+                ko = m.get("kickoff", "")
+                if not ko: continue
+                try:
+                    ko_dt = datetime.fromisoformat(ko.replace("Z", "+00:00"))
+                    local_date = ko_dt.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+                except:
+                    local_date = ko[:10]
+                if (local_date == today) and (m.get("finished") or m.get("state_id") == 5):
+                    today_fixtures.append({
+                        **m,
+                        "league_id": league_id,
+                        "season_id": season_id,
+                    })
+
+        summary["fixtures_found"] = len(today_fixtures)
+        log.info(f"Nightly: {len(today_fixtures)} completed fixtures for {today}")
+
+        if not today_fixtures:
+            log.info("Nightly: no completed fixtures, exiting")
+            _cache["nightly_last_run"] = today
+            _cache["nightly_summary"]  = summary
+            return
+
+        # Get season scores for player lookup
+        season_data    = _cache.get("season_scores", {})
+        all_players    = season_data.get("players", [])
+        player_lookup  = {p["player_id"]: p for p in all_players if p.get("player_id")}
+
+        # ── Step 2: Match log collection ──────────────────────────────────────
+        log.info("Nightly: collecting match logs...")
+        match_log_rows = []
+        existing_logs  = set()
+        try:
+            ex = sb.table("player_match_log")\
+                .select("fixture_id,player_id")\
+                .eq("game_date", today).execute().data
+            existing_logs = {(r["fixture_id"], r["player_id"]) for r in ex}
+        except: pass
+
+        for match in today_fixtures:
+            fixture_id = int(match["match_id"])
+            league_id  = match["league_id"]
+            season_id  = match["season_id"]
+            try:
+                r = req.get(
+                    f"{sm}/fixtures/{fixture_id}",
+                    params={"api_token": token, "include": "lineups.details;participants"},
+                    timeout=30
+                )
+                r.raise_for_status()
+                fixture = r.json().get("data", {})
+                lineups = fixture.get("lineups", [])
+                if isinstance(lineups, dict): lineups = lineups.get("data", [])
+
+                for player in lineups:
+                    pid = player.get("player_id")
+                    if not pid or (fixture_id, pid) in existing_logs: continue
+                    details = player.get("details", [])
+                    if isinstance(details, dict): details = details.get("data", [])
+                    if not details: continue
+
+                    stats = {}
+                    for d in details:
+                        tid = d.get("type_id")
+                        val = d.get("data", {}).get("value")
+                        if tid in MATCH_LOG_TYPES and val is not None:
+                            stats[MATCH_LOG_TYPES[tid]] = val
+
+                    minutes = stats.get("minutes_played", 0) or 0
+                    if minutes < 10: continue
+
+                    nineties    = minutes / 90
+                    total_passes = stats.get("total_passes", 0) or 0
+                    acc_passes   = stats.get("acc_passes", 0) or 0
+                    pass_acc     = round(acc_passes / total_passes, 3) if total_passes > 0 else None
+                    p_info       = player_lookup.get(pid, {})
+
+                    match_log_rows.append({
+                        "player_id":           pid,
+                        "fixture_id":          fixture_id,
+                        "game_date":           today,
+                        "league_id":           league_id,
+                        "season_id":           season_id,
+                        "team_id":             player.get("team_id"),
+                        "player_name":         player.get("player_name") or p_info.get("player_name"),
+                        "team_name":           p_info.get("team_name"),
+                        "minutes_played":      minutes,
+                        "goals":               int(stats.get("goals", 0) or 0),
+                        "assists":             int(stats.get("assists", 0) or 0),
+                        "key_passes":          int(stats.get("key_passes", 0) or 0),
+                        "acc_crosses":         int(stats.get("acc_crosses", 0) or 0),
+                        "shots_on_target":     int(stats.get("shots_on_target", 0) or 0),
+                        "shots_total":         int(stats.get("shots_total", 0) or 0),
+                        "big_chances_created": int(stats.get("big_chances_created", 0) or 0),
+                        "kp_per90":            round((stats.get("key_passes", 0) or 0) / nineties, 3),
+                        "cross_per90":         round((stats.get("acc_crosses", 0) or 0) / nineties, 3),
+                        "sot_per90":           round((stats.get("shots_on_target", 0) or 0) / nineties, 3),
+                        "goals_per90":         round((stats.get("goals", 0) or 0) / nineties, 3),
+                        "pass_accuracy":       pass_acc,
+                        "xg":                  stats.get("xg"),
+                    })
+            except Exception as e:
+                log.error(f"Nightly match log error fixture {fixture_id}: {e}")
+                summary["errors"].append(f"match_log:{fixture_id}:{str(e)}")
+
+        if match_log_rows:
+            for i in range(0, len(match_log_rows), 100):
+                sb.table("player_match_log").upsert(
+                    match_log_rows[i:i+100],
+                    on_conflict="fixture_id,player_id"
+                ).execute()
+            summary["match_log_rows"] = len(match_log_rows)
+            log.info(f"Nightly: {len(match_log_rows)} match log rows written")
+
+        # ── Step 3: Record outcomes ───────────────────────────────────────────
+        log.info("Nightly: recording outcomes...")
+
+        today_team_ids = set()
+        for m in today_fixtures:
+            today_team_ids.add(str(m.get("home_id", "")))
+            today_team_ids.add(str(m.get("away_id", "")))
+
+        today_players   = [p for p in all_players if str(p.get("team_id", "")) in today_team_ids]
+        assist_ranked   = sorted(today_players, key=lambda x: x.get("assist_index") or 0, reverse=True)
+        goal_ranked     = sorted(today_players, key=lambda x: x.get("goal_score") or 0, reverse=True)
+        tsoa_ranked     = sorted(today_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
+        assist_rank_map = {p["player_id"]: i+1 for i, p in enumerate(assist_ranked)}
+        goal_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(goal_ranked)}
+        tsoa_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(tsoa_ranked)}
+
+        # Build today-context for concession flags
+        try:
+            from .positional_concessions import GRANULAR_POSITION_MAP as GPM, BROAD_MAP as BM
+            from .positional_concessions import THRESHOLD_HIGH, THRESHOLD_MEDIUM
+            ABS_GOAL_THRESH   = {"GK":99,"DEF":0.27,"MID":0.75,"FWD":0.85}
+            ABS_ASSIST_THRESH = {"GK":99,"DEF":0.30,"MID":0.70,"FWD":0.40}
+
+            season_ids = list({f["season_id"] for f in today_fixtures})
+            avg_rows   = sb.table("positional_concessions_league_avg")\
+                .select("*").eq("granularity","broad").in_("season_id", season_ids).execute().data
+            avg_map = {}
+            for row in avg_rows:
+                sid = row["season_id"]
+                if sid not in avg_map: avg_map[sid] = {}
+                avg_map[sid][row["broad_position"]] = row
+
+            tids_by_season = {}
+            for f in today_fixtures:
+                sid = f["season_id"]
+                if sid not in tids_by_season: tids_by_season[sid] = set()
+                if f.get("home_id"): tids_by_season[sid].add(int(f["home_id"]))
+                if f.get("away_id"): tids_by_season[sid].add(int(f["away_id"]))
+
+            broad_conc = {}
+            for sid, tids in tids_by_season.items():
+                rows = sb.table("positional_concessions_broad")\
+                    .select("*").eq("season_id",sid).in_("team_id",list(tids)).execute().data
+                for row in rows:
+                    broad_conc[(row["team_id"],sid,row["broad_position"])] = row
+
+            nightly_context = {}
+            for f in today_fixtures:
+                sid = f["season_id"]
+                for team_id, opp_id in [(f.get("home_id"), f.get("away_id")), (f.get("away_id"), f.get("home_id"))]:
+                    avgs = avg_map.get(sid, {})
+                    for bp in ["GK","DEF","MID","FWD"]:
+                        row = broad_conc.get((int(opp_id), sid, bp))
+                        if not row: continue
+                        gp  = row["games_played"] or 1
+                        gpg = row["goals_conceded"] / gp
+                        apg = row["assists_conceded"] / gp
+                        avg_g = avgs.get(bp,{}).get("avg_goals_per_game",0.001) or 0.001
+                        avg_a = avgs.get(bp,{}).get("avg_assists_per_game",0.001) or 0.001
+                        g_mult = gpg / avg_g
+                        a_mult = apg / avg_a
+                        abs_g  = gpg >= ABS_GOAL_THRESH.get(bp, 99)
+                        abs_a  = apg >= ABS_ASSIST_THRESH.get(bp, 99)
+                        flag = None
+                        if g_mult >= THRESHOLD_HIGH or a_mult >= THRESHOLD_HIGH or abs_g or abs_a:
+                            flag = "HIGH"
+                        elif g_mult >= THRESHOLD_MEDIUM or a_mult >= THRESHOLD_MEDIUM:
+                            flag = "MEDIUM"
+                        if not flag: continue
+                        for p in today_players:
+                            if str(p.get("team_id")) != str(team_id): continue
+                            dp = p.get("detailed_position_id")
+                            pc = GPM.get(dp, (None,None))[0]
+                            if not pc: continue
+                            if BM.get(pc,"MID") == bp:
+                                nightly_context[str(p["player_id"])] = {"concession_flag": flag}
+        except Exception as e:
+            log.error(f"Nightly context error: {e}")
+            nightly_context = {}
+
+        actual_goals   = {}
+        actual_assists = {}
+        player_fixture = {}
+
+        for match in today_fixtures:
+            fixture_id = match.get("match_id")
+            try:
+                r = req.get(
+                    f"{sm}/fixtures/{fixture_id}",
+                    params={"api_token": token, "include": "events"},
+                    timeout=30
+                )
+                r.raise_for_status()
+                events = r.json().get("data", {}).get("events", [])
+                if isinstance(events, dict): events = events.get("data", [])
+                for e in events:
+                    if e.get("type_id") != 14: continue
+                    pid = e.get("player_id")
+                    rid = e.get("related_player_id")
+                    if pid:
+                        actual_goals[pid] = actual_goals.get(pid, 0) + 1
+                        if pid not in player_fixture: player_fixture[pid] = fixture_id
+                    if rid:
+                        actual_assists[rid] = actual_assists.get(rid, 0) + 1
+                        if rid not in player_fixture: player_fixture[rid] = fixture_id
+            except Exception as e:
+                log.error(f"Nightly outcomes error fixture {fixture_id}: {e}")
+                summary["errors"].append(f"outcomes:{fixture_id}:{str(e)}")
+
+        all_pids      = set(list(actual_goals.keys()) + list(actual_assists.keys()))
+        outcome_rows  = []
+        for pid in all_pids:
+            p   = player_lookup.get(pid, {})
+            g   = actual_goals.get(pid, 0)
+            a   = actual_assists.get(pid, 0)
+            ctx = nightly_context.get(str(pid), {})
+            outcome_rows.append({
+                "game_date":        today,
+                "fixture_id":       player_fixture.get(pid),
+                "player_id":        pid,
+                "player_name":      p.get("player_name"),
+                "team_name":        p.get("team_name"),
+                "league_id":        p.get("league_id"),
+                "sm_assist_rank":   assist_rank_map.get(pid),
+                "sm_goal_rank":     goal_rank_map.get(pid),
+                "sm_tsoa_rank":     tsoa_rank_map.get(pid),
+                "assist_index":     p.get("assist_index"),
+                "goal_score":       p.get("goal_score"),
+                "tsoa_score":       p.get("tsoa_score"),
+                "concession_flag":  ctx.get("concession_flag"),
+                "actual_goals":     g,
+                "actual_assists":   a,
+                "had_contribution": (g > 0 or a > 0),
+                "outcome_recorded": True,
+            })
+
+        if outcome_rows:
+            for i in range(0, len(outcome_rows), 100):
+                sb.table("sm_matchday_results").upsert(
+                    outcome_rows[i:i+100],
+                    on_conflict="fixture_id,player_id"
+                ).execute()
+            summary["outcome_rows"] = len(outcome_rows)
+            log.info(f"Nightly: {len(outcome_rows)} outcome rows written")
+
+        # ── Step 4: Update concessions for new fixtures ───────────────────────
+        log.info("Nightly: updating concessions...")
+        from .positional_concessions import process_fixture as pf
+        conc_updated = 0
+        for match in today_fixtures:
+            try:
+                pf(int(match["match_id"]), match["season_id"], match["league_id"])
+                conc_updated += 1
+            except Exception as e:
+                log.error(f"Nightly concessions error {match['match_id']}: {e}")
+        summary["concessions_updated"] = conc_updated
+
+        # ── Step 5: Recalculate league averages ───────────────────────────────
+        log.info("Nightly: recalculating league averages...")
+        try:
+            updated_seasons = {(f["league_id"], f["season_id"]) for f in today_fixtures}
+            for league_id, season_id in updated_seasons:
+                broad_rows = sb.table("positional_concessions_broad")\
+                    .select("*").eq("season_id", season_id).eq("league_id", league_id).execute().data
+                if not broad_rows: continue
+                groups = defaultdict(lambda: defaultdict(float))
+                for row in broad_rows:
+                    bp = row["broad_position"]
+                    gp = row["games_played"] or 0
+                    groups[bp]["goals"]        += row["goals_conceded"]
+                    groups[bp]["assists"]      += row["assists_conceded"]
+                    groups[bp]["goals_home"]   += row.get("goals_conceded_home", 0)
+                    groups[bp]["goals_away"]   += row.get("goals_conceded_away", 0)
+                    groups[bp]["assists_home"] += row.get("assists_conceded_home", 0)
+                    groups[bp]["assists_away"] += row.get("assists_conceded_away", 0)
+                    groups[bp]["bc"]           += row.get("bc_conceded", 0)
+                    groups[bp]["bc_home"]      += row.get("bc_conceded_home", 0)
+                    groups[bp]["bc_away"]      += row.get("bc_conceded_away", 0)
+                    groups[bp]["games"]        += gp
+                    groups[bp]["games_home"]   += gp / 2
+                    groups[bp]["games_away"]   += gp / 2
+                    groups[bp]["teams"]        += 1
+                for bp, t in groups.items():
+                    gp      = t["games"]      or 1
+                    gp_home = t["games_home"] or 1
+                    gp_away = t["games_away"] or 1
+                    sb.table("positional_concessions_league_avg").upsert({
+                        "league_id":            league_id,
+                        "season_id":            season_id,
+                        "broad_position":       bp,
+                        "position_code":        None,
+                        "granularity":          "broad",
+                        "avg_goals_per_game":   t["goals"]        / gp,
+                        "avg_goals_home":       t["goals_home"]   / gp_home,
+                        "avg_goals_away":       t["goals_away"]   / gp_away,
+                        "avg_assists_per_game": t["assists"]      / gp,
+                        "avg_assists_home":     t["assists_home"] / gp_home,
+                        "avg_assists_away":     t["assists_away"] / gp_away,
+                        "avg_bc_per_game":      t["bc"]           / gp,
+                        "avg_bc_home":          t["bc_home"]      / gp_home,
+                        "avg_bc_away":          t["bc_away"]      / gp_away,
+                        "sample_size":          int(t["teams"]),
+                        "last_updated":         datetime.utcnow().isoformat()
+                    }, on_conflict="league_id,season_id,granularity,broad_position").execute()
+        except Exception as e:
+            log.error(f"Nightly league averages error: {e}")
+            summary["errors"].append(f"league_avgs:{str(e)}")
+
+        # ── Step 6: Refresh season scores cache ───────────────────────────────
+        log.info("Nightly: refreshing season scores cache...")
+        try:
+            _cache["season_scores"]         = get_season_scores()
+            _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        except Exception as e:
+            log.error(f"Nightly season scores refresh error: {e}")
+
+        _cache["nightly_last_run"] = today
+        _cache["nightly_summary"]  = summary
+        log.info(f"Nightly complete: {summary}")
+
+    threading.Thread(target=run_nightly, daemon=True).start()
+    return jsonify({"status": "ok", "message": "Nightly pipeline started", "date": datetime.now().__class__.__name__})
+
+
+@app.route('/api/nightly/status', methods=['GET'])
+def nightly_status():
+    return jsonify({
+        "last_run": _cache.get("nightly_last_run"),
+        "summary":  _cache.get("nightly_summary"),
+    })
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
