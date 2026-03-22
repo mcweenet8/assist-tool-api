@@ -214,14 +214,11 @@ def sm_today_context():
                         "season_id": season_id,
                     })
 
-        log.info(f"today-context: today={today} cache_leagues={list(fixtures.keys())} today_fixtures={len(today_fixtures)}")
-
         if not today_fixtures:
             return jsonify({"context": {}, "count": 0})
 
         # Get all relevant league averages in one query
         season_ids = list({f["season_id"] for f in today_fixtures})
-        log.info(f"today-context: season_ids={season_ids}")
         avg_rows   = sb.table("positional_concessions_league_avg")\
             .select("*").eq("granularity", "broad")\
             .in_("season_id", season_ids).execute().data
@@ -249,7 +246,7 @@ def sm_today_context():
             for row in rows:
                 broad_map[(row["team_id"], sid, row["broad_position"])] = row
 
-        log.info(f"today-context: avg_rows={len(avg_rows)} avg_map_keys={list(avg_map.keys())} broad_map_size={len(broad_map)}")
+        log.info(f"today-context: {len(today_fixtures)} fixtures, {len(context)} flagged players")
 
         # Build multipliers per team per season inline
         def get_team_multipliers(team_id, season_id):
