@@ -550,14 +550,13 @@ def get_season_scores():
                 bc_ratio    * ASSIST_WEIGHTS["bc_ratio"] +
                 pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"] +
                 cca_ratio   * ASSIST_WEIGHTS["cca_ratio"]
-            ), 4)
+            ) * ASSIST_SCALE, 4)
 
             # DC Goal Score — league-normalized ratios
             goal_score = round((
                 sot_ratio   * GOAL_WEIGHTS["sot_ratio"] +
-                goals_ratio * GOAL_WEIGHTS["goals_ratio"] +
-                bc_ratio    * GOAL_WEIGHTS["bc_ratio"]
-            ), 4)
+                goals_ratio * GOAL_WEIGHTS["goals_ratio"]
+            ) * GOAL_SCALE, 4)
 
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
 
