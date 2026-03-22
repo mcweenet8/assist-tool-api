@@ -586,33 +586,41 @@ def get_season_scores():
             goals_per90 = row.get("goals_per90")         or 0
             pass_acc    = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
 
-            # Assist ratios — compare against positional averages
-            kp_ratio    = kp_per90    / pavgs.get("kp_per90",    0.001)
-            cross_ratio = cross_per90 / pavgs.get("cross_per90", 0.001)
-            pa_ratio    = pass_acc    / pavgs.get("pass_acc",     0.001)
+            # Assist ratios — compare against overall league averages
+            # (creative output is cross-positional — DEF creators should rank vs whole league)
+            kp_ratio    = kp_per90    / avgs.get("kp_per90",    0.001)
+            cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
+            pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
             bc_per90    = row.get("big_chances_per90") or 0
-            bc_ratio    = bc_per90    / pavgs.get("bc_per90",    0.001)
+            bc_ratio    = bc_per90    / avgs.get("bc_per90",    0.001)
             cca_val     = cca_map.get(row.get("player_id"), 0) or 0
-            cca_ratio   = cca_val     / pavgs.get("cca",          0.001)
+            cca_ratio   = cca_val     / avgs.get("cca",          0.001)
 
             # Goal ratios — compare against positional averages
+            # (goal scoring is position-dependent — FWD vs FWD, MID vs MID)
             sot_ratio   = sot_per90   / pavgs.get("sot_per90",   0.001)
             goals_ratio = goals_per90 / pavgs.get("goals_per90", 0.001)
 
-            # DC Assist Index — pure ratio weighted average, no conversion modifier
-            assist_index = round((
-                kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
-                cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
-                bc_ratio    * ASSIST_WEIGHTS["bc_ratio"] +
-                pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"] +
-                cca_ratio   * ASSIST_WEIGHTS["cca_ratio"]
-            ) * ASSIST_SCALE, 4)
+            # DC Assist Index — GKs excluded from assist rankings
+            if pos == "GK":
+                assist_index = 0.0
+            else:
+                assist_index = round((
+                    kp_ratio    * ASSIST_WEIGHTS["kp_ratio"] +
+                    cross_ratio * ASSIST_WEIGHTS["cross_ratio"] +
+                    bc_ratio    * ASSIST_WEIGHTS["bc_ratio"] +
+                    pa_ratio    * ASSIST_WEIGHTS["pass_acc_ratio"] +
+                    cca_ratio   * ASSIST_WEIGHTS["cca_ratio"]
+                ) * ASSIST_SCALE, 4)
 
-            # DC Goal Score — league-normalized ratios
-            goal_score = round((
-                sot_ratio   * GOAL_WEIGHTS["sot_ratio"] +
-                goals_ratio * GOAL_WEIGHTS["goals_ratio"]
-            ) * GOAL_SCALE, 4)
+            # DC Goal Score — GKs excluded from goal rankings
+            if pos == "GK":
+                goal_score = 0.0
+            else:
+                goal_score = round((
+                    sot_ratio   * GOAL_WEIGHTS["sot_ratio"] +
+                    goals_ratio * GOAL_WEIGHTS["goals_ratio"]
+                ) * GOAL_SCALE, 4)
 
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
 
