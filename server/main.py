@@ -116,7 +116,7 @@ def _refresh_lineup_availability():
 
         _time.sleep(300)  # refresh every 5 minutes
 
-threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
+# threading.Thread(target=_refresh_lineup_availability, daemon=True).start()
 
 
 # ── Health / version ──────────────────────────────────────────────────────────
