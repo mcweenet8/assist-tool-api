@@ -658,6 +658,100 @@ def _get_team_ha_stats(team_id, season_id):
         return {}
 
 
+@app.route('/api/sm/lineups/today', methods=['GET'])
+def sm_lineups_today():
+    """
+    Fetch lineup availability for today's active fixtures only.
+    Cached for 5 minutes. Called by app when Today tab opens.
+    Only fetches live, finished, or within-2hr fixtures.
+    """
+    import time as _time
+    import pytz as _pytz
+
+    # Return cache if fresh (within 5 minutes)
+    cached     = _cache.get("lineup_availability", {})
+    cache_time = _cache.get("lineup_availability_updated")
+    if cache_time:
+        try:
+            from datetime import datetime as _dt
+            age = (_dt.now() - _dt.strptime(cache_time, "%Y-%m-%d %H:%M")).total_seconds()
+            if age < 300:
+                return jsonify({"fixture_availability": cached, "cached": True, "age_seconds": int(age)})
+        except:
+            pass
+
+    fixtures = _cache.get("fixtures", {})
+    token    = os.environ.get("SPORTMONKS_API_TOKEN")
+    if not fixtures or not token:
+        return jsonify({"fixture_availability": {}, "error": "no fixtures or token"})
+
+    now_utc   = datetime.now(pytz.utc)
+    today_str = now_utc.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+    availability = dict(cached)
+
+    # Find today's active fixtures
+    active_fids = []
+    for league_matches in fixtures.values():
+        for m in league_matches:
+            ko  = m.get("kickoff", "")
+            fid = str(m.get("match_id", ""))
+            if not fid or not ko: continue
+
+            is_live     = m.get("live", False)
+            is_finished = m.get("finished", False)
+
+            try:
+                ko_dt      = datetime.fromisoformat(ko.replace("Z", "+00:00"))
+                local_date = ko_dt.astimezone(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+                mins_to_ko = (ko_dt.replace(tzinfo=pytz.utc) - now_utc).total_seconds() / 60
+            except:
+                continue
+
+            if local_date != today_str: continue
+
+            is_active = is_live or is_finished or (-60 <= mins_to_ko <= 120)
+            if not is_active:
+                availability[fid] = {"confirmed": False, "starters": [], "sidelined": []}
+            else:
+                active_fids.append(fid)
+
+    # Fetch lineups sequentially for active fixtures
+    for fid in active_fids:
+        try:
+            r = requests.get(
+                f"https://api.sportmonks.com/v3/football/fixtures/{fid}",
+                params={"api_token": token, "include": "lineups;sidelined"},
+                timeout=15
+            )
+            if r.status_code == 429:
+                log.warning(f"Lineup fetch rate limited for {fid}")
+                break
+            data      = r.json().get("data", {})
+            lineups   = data.get("lineups", [])
+            if isinstance(lineups, dict): lineups = lineups.get("data", [])
+            sidelined = data.get("sidelined", [])
+            if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
+
+            confirmed = any(p.get("formation_field") for p in lineups)
+            starters  = [p["player_id"] for p in lineups if p.get("type_id") == 11]
+            sidelined_ids = [p["player_id"] for p in sidelined]
+
+            availability[fid] = {
+                "confirmed": confirmed,
+                "starters":  starters,
+                "sidelined": sidelined_ids,
+            }
+            log.info(f"Lineup fetched {fid}: confirmed={confirmed} starters={len(starters)}")
+            _time.sleep(0.5)
+        except Exception as e:
+            log.warning(f"Lineup fetch error {fid}: {e}")
+
+    _cache["lineup_availability"] = availability
+    _cache["lineup_availability_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    return jsonify({"fixture_availability": availability, "cached": False, "active_count": len(active_fids)})
+
+
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
     try:
