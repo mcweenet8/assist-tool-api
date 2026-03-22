@@ -463,23 +463,56 @@ def get_season_scores():
 
         from collections import defaultdict
 
-        # ── Step 1: League averages ───────────────────────────────────────────
+        GRANULAR_POS_MAP = {
+            24:"GK",144:"GK",
+            148:"DEF",154:"DEF",155:"DEF",
+            149:"MID",150:"MID",153:"MID",157:"MID",158:"MID",
+            151:"FWD",152:"FWD",156:"FWD",159:"FWD",160:"FWD",
+            161:"FWD",162:"FWD",163:"FWD",
+        }
+        BROAD_POS_MAP = {24:"GK",25:"DEF",26:"MID",27:"FWD"}
+
+        def get_pos(row):
+            return GRANULAR_POS_MAP.get(row.get("detailed_position_id")) or \
+                   BROAD_POS_MAP.get(row.get("position_id"), "MID")
+
+        # ── Step 1: League averages — overall AND by position ─────────────────
         league_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
             "goals_per90": [], "pass_acc": [], "conversion": [], "bc_per90": [], "cca": []
+        })
+        pos_stats = defaultdict(lambda: {
+            "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
+            "goals_per90": [], "pass_acc": [], "bc_per90": [], "cca": []
         })
 
         for row in rows:
             lid = row.get("league_id")
             if not lid: continue
-            if row.get("kp_per90"):              league_stats[lid]["kp_per90"].append(row["kp_per90"])
-            if row.get("acc_cross_per90"):        league_stats[lid]["acc_cross_per90"].append(row["acc_cross_per90"])
-            if row.get("sot_per90"):              league_stats[lid]["sot_per90"].append(row["sot_per90"])
-            if row.get("goals_per90"):            league_stats[lid]["goals_per90"].append(row["goals_per90"])
-            if row.get("pass_accuracy_baseline"): league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
-            if row.get("big_chances_per90"):      league_stats[lid]["bc_per90"].append(row["big_chances_per90"])
+            pos = get_pos(row)
+
+            if row.get("kp_per90"):
+                league_stats[lid]["kp_per90"].append(row["kp_per90"])
+                pos_stats[(lid,pos)]["kp_per90"].append(row["kp_per90"])
+            if row.get("acc_cross_per90"):
+                league_stats[lid]["acc_cross_per90"].append(row["acc_cross_per90"])
+                pos_stats[(lid,pos)]["acc_cross_per90"].append(row["acc_cross_per90"])
+            if row.get("sot_per90"):
+                league_stats[lid]["sot_per90"].append(row["sot_per90"])
+                pos_stats[(lid,pos)]["sot_per90"].append(row["sot_per90"])
+            if row.get("goals_per90"):
+                league_stats[lid]["goals_per90"].append(row["goals_per90"])
+                pos_stats[(lid,pos)]["goals_per90"].append(row["goals_per90"])
+            if row.get("pass_accuracy_baseline"):
+                league_stats[lid]["pass_acc"].append(row["pass_accuracy_baseline"])
+                pos_stats[(lid,pos)]["pass_acc"].append(row["pass_accuracy_baseline"])
+            if row.get("big_chances_per90"):
+                league_stats[lid]["bc_per90"].append(row["big_chances_per90"])
+                pos_stats[(lid,pos)]["bc_per90"].append(row["big_chances_per90"])
             cca_val = cca_map.get(row.get("player_id"), 0)
-            if cca_val > 0:                        league_stats[lid]["cca"].append(cca_val)
+            if cca_val > 0:
+                league_stats[lid]["cca"].append(cca_val)
+                pos_stats[(lid,pos)]["cca"].append(cca_val)
             kp_total = row.get("key_passes_total") or 0
             a_total  = row.get("assists_total") or 0
             mins     = row.get("minutes_played") or 0
@@ -499,6 +532,20 @@ def get_season_scores():
                 "conversion":  avg(stats["conversion"]),
                 "bc_per90":    avg(stats["bc_per90"]),
                 "cca":         avg(stats["cca"]),
+            }
+
+        # Positional averages — fallback to league avg if fewer than 5 samples
+        pos_avgs = {}
+        for (lid, pos), stats in pos_stats.items():
+            fb = league_avgs.get(lid, {})
+            pos_avgs[(lid, pos)] = {
+                "kp_per90":    avg(stats["kp_per90"])        if len(stats["kp_per90"])        >= 5 else fb.get("kp_per90",    0.001),
+                "cross_per90": avg(stats["acc_cross_per90"]) if len(stats["acc_cross_per90"]) >= 5 else fb.get("cross_per90", 0.001),
+                "sot_per90":   avg(stats["sot_per90"])       if len(stats["sot_per90"])       >= 5 else fb.get("sot_per90",   0.001),
+                "goals_per90": avg(stats["goals_per90"])     if len(stats["goals_per90"])     >= 5 else fb.get("goals_per90", 0.001),
+                "pass_acc":    avg(stats["pass_acc"])        if len(stats["pass_acc"])        >= 5 else fb.get("pass_acc",    0.001),
+                "bc_per90":    avg(stats["bc_per90"])        if len(stats["bc_per90"])        >= 5 else fb.get("bc_per90",    0.001),
+                "cca":         avg(stats["cca"])             if len(stats["cca"])             >= 5 else fb.get("cca",         0.001),
             }
 
         # ── Step 2: Dynamic threshold per league ─────────────────────────────
@@ -530,21 +577,27 @@ def get_season_scores():
             if not avgs:
                 continue
 
+            pos  = get_pos(row)
+            pavgs = pos_avgs.get((lid, pos), avgs)  # positional avg, fallback to league
+
             kp_per90    = row.get("kp_per90")            or 0
             cross_per90 = row.get("acc_cross_per90")     or 0
             sot_per90   = row.get("sot_per90")           or 0
             goals_per90 = row.get("goals_per90")         or 0
             pass_acc    = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
 
-            kp_ratio    = kp_per90    / avgs.get("kp_per90",    0.001)
-            cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
-            pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
-            sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
-            goals_ratio = goals_per90 / avgs.get("goals_per90", 0.001)
+            # Assist ratios — compare against positional averages
+            kp_ratio    = kp_per90    / pavgs.get("kp_per90",    0.001)
+            cross_ratio = cross_per90 / pavgs.get("cross_per90", 0.001)
+            pa_ratio    = pass_acc    / pavgs.get("pass_acc",     0.001)
             bc_per90    = row.get("big_chances_per90") or 0
-            bc_ratio    = bc_per90    / avgs.get("bc_per90",    0.001)
+            bc_ratio    = bc_per90    / pavgs.get("bc_per90",    0.001)
             cca_val     = cca_map.get(row.get("player_id"), 0) or 0
-            cca_ratio   = cca_val     / avgs.get("cca",          0.001)
+            cca_ratio   = cca_val     / pavgs.get("cca",          0.001)
+
+            # Goal ratios — compare against positional averages
+            sot_ratio   = sot_per90   / pavgs.get("sot_per90",   0.001)
+            goals_ratio = goals_per90 / pavgs.get("goals_per90", 0.001)
 
             # DC Assist Index — pure ratio weighted average, no conversion modifier
             assist_index = round((
@@ -603,6 +656,7 @@ def get_season_scores():
                 "baseline_cross_per90": cross_per90,
                 "baseline_sot_per90":   sot_per90,
                 "data_source":          "season_baseline",
+                "broad_position":       pos,
                 "detailed_position_id": row.get("detailed_position_id"),
                 "position_id":          row.get("position_id"),
             })
