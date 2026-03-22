@@ -4,6 +4,7 @@ server/sm_fixtures.py
 """
 
 import os
+import time
 import logging
 from datetime import datetime, timedelta
 from .sm_baseline import _sm_get
@@ -26,14 +27,12 @@ FINISHED_STATES  = {5}
 SCHEDULED_STATES = {1}
 SKIP_STATES      = {9, 10}
 
-# State labels for display — covers both old and new SM state IDs
 STATE_LABELS = {
     2:  "1H",  3:  "HT",  4:  "2H",  6:  "ET",  7:  "PEN",
     11: "1H",  12: "HT",  13: "2H",  14: "ET",  15: "PEN",
     20: "1H",  21: "HT",  22: "2H",  23: "ET",  24: "PEN",
 }
 
-# Developer name → live check (belt and suspenders)
 LIVE_DEVELOPER_NAMES = {
     "INPLAY_1ST_HALF", "INPLAY_2ND_HALF", "HALF_TIME",
     "INPLAY_ET", "INPLAY_ET_2ND_HALF", "PENALTY_SHOOTOUT",
@@ -50,21 +49,14 @@ def sm_team_logo(team_id):
 
 
 def _extract_score(scores):
-    """
-    Extract current score from SM scores array.
-    Looks for CURRENT description first, falls back to highest type_id.
-    Returns (home_goals, away_goals) or (None, None)
-    """
     if not scores:
         return None, None
 
     if isinstance(scores, dict):
         scores = scores.get("data", [])
 
-    # Find CURRENT scores
     current = [s for s in scores if s.get("description") == "CURRENT"]
     if not current:
-        # Fall back to 2ND_HALF or 1ST_HALF
         for desc in ["2ND_HALF", "1ST_HALF"]:
             current = [s for s in scores if s.get("description") == desc]
             if current: break
@@ -87,13 +79,11 @@ def _extract_score(scores):
 
 
 def _extract_minute(periods, state_id):
-    """Extract current minute from periods array."""
     if not periods:
         return None
     if isinstance(periods, dict):
         periods = periods.get("data", [])
 
-    # Find ticking period first
     ticking = [p for p in periods if p.get("ticking")]
     target = ticking[0] if ticking else (periods[-1] if periods else None)
 
@@ -115,7 +105,6 @@ def _extract_minute(periods, state_id):
 
 
 def _parse_fixture(fixture, league_name):
-    """Parse a Sportmonks fixture into app format."""
     state_id = fixture.get("state_id")
     if state_id in SKIP_STATES:
         return None
@@ -141,7 +130,6 @@ def _parse_fixture(fixture, league_name):
     home_name = home_team.get("name", "")
     away_name = away_team.get("name", "")
 
-    # Kickoff
     starting_at = fixture.get("starting_at", "")
     kickoff_utc = ""
     if starting_at:
@@ -151,13 +139,11 @@ def _parse_fixture(fixture, league_name):
         except Exception:
             kickoff_utc = starting_at
 
-    # Check live via state_id OR developer_name
     state_obj = fixture.get("state", {}) or {}
     dev_name  = state_obj.get("developer_name", "")
     is_live     = state_id in LIVE_STATES or dev_name in LIVE_DEVELOPER_NAMES
     is_finished = state_id in FINISHED_STATES or dev_name == "FT"
 
-    # Score
     score = None
     if is_live or is_finished:
         scores = fixture.get("scores", [])
@@ -165,7 +151,6 @@ def _parse_fixture(fixture, league_name):
         if home_goals is not None and away_goals is not None:
             score = f"{home_goals} - {away_goals}"
 
-    # Minute
     minute = None
     if is_live:
         periods = fixture.get("periods", [])
@@ -217,6 +202,8 @@ def get_sm_fixtures(days=7):
             except Exception as e:
                 log.error(f"SM fixtures {league_name} {iso_date}: {e}")
 
+            time.sleep(0.3)  # avoid rate limit burst
+
     for ln in fixtures_by_league:
         fixtures_by_league[ln].sort(key=lambda x: x.get("kickoff", "") or "")
 
@@ -249,5 +236,7 @@ def get_sm_live_fixtures():
 
         except Exception as e:
             log.error(f"SM live {league_name}: {e}")
+
+        time.sleep(0.3)  # avoid rate limit burst
 
     return live
