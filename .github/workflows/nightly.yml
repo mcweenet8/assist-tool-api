@@ -2,11 +2,13 @@ name: Nightly Pipeline
 
 on:
   schedule:
-    - cron: '0 23 * * *'  # 11pm UTC daily
-  workflow_dispatch:        # allows manual trigger from GitHub Actions tab
+    - cron: '0 23 * * *'   # 11pm UTC — nightly pipeline
+    - cron: '0 */3 * * *'  # every 3 hours — keep cache warm
+  workflow_dispatch:
 
 jobs:
   run-nightly:
+    if: github.event.schedule == '0 23 * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger nightly pipeline
@@ -14,3 +16,10 @@ jobs:
           curl -X POST https://web-production-0e482.up.railway.app/api/nightly/run
           sleep 10
           curl https://web-production-0e482.up.railway.app/api/nightly/status
+
+  warm-cache:
+    if: github.event.schedule == '0 */3 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm cache
+        run: curl -X POST https://web-production-0e482.up.railway.app/refresh
