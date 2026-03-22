@@ -596,10 +596,10 @@ def get_season_scores():
             cca_val     = cca_map.get(row.get("player_id"), 0) or 0
             cca_ratio   = cca_val     / avgs.get("cca",          0.001)
 
-            # Goal ratios — compare against positional averages
-            # (goal scoring is position-dependent — FWD vs FWD, MID vs MID)
-            sot_ratio   = sot_per90   / pavgs.get("sot_per90",   0.001)
-            goals_ratio = goals_per90 / pavgs.get("goals_per90", 0.001)
+            # Goal ratios — overall league averages for now
+            # TODO: Switch to lineup-derived position once player_match_log has 10+ match days
+            sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
+            goals_ratio = goals_per90 / avgs.get("goals_per90", 0.001)
 
             # DC Assist Index — GKs excluded from assist rankings
             if pos == "GK":
