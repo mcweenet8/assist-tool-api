@@ -33,7 +33,7 @@ GOAL_WEIGHTS = {
 }
 
 ASSIST_SCALE = 1.35
-GOAL_SCALE   = 1.0
+GOAL_SCALE   = 1.10
 
 LEAGUE_NAMES = {
     8:    "Premier League",
