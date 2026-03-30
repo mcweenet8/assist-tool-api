@@ -1064,6 +1064,12 @@ def sm_match(fixture_id):
                 if cache_key not in _cache:
                     _cache[cache_key] = get_multipliers(fixture_id, season_id, league_id)
                 concession_mults = _cache[cache_key]
+                log.info(f"PE mults for {fixture_id}: teams={list(concession_mults.keys())} home={home_id} away={away_id}")
+                for tid, mults in concession_mults.items():
+                    broad = mults.get("broad", {})
+                    for bp, bdata in broad.items():
+                        if bdata.get("flag"):
+                            log.info(f"  team={tid} {bp}: flag={bdata['flag']} gm={bdata.get('goal_multiplier')} am={bdata.get('assist_multiplier')}")
         except Exception as e:
             log.warning(f"get_multipliers error {fixture_id}: {e}")
 
