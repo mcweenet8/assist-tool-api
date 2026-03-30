@@ -1035,6 +1035,8 @@ def sm_match(fixture_id):
         except Exception as e:
             log.warning(f"get_multipliers error {fixture_id}: {e}")
 
+        from .positional_concessions import GRANULAR_POSITION_MAP as _GPM, apply_concession_multiplier as _acm
+
         def apply_pe(players, opponent_team_id):
             opp_mults = concession_mults.get(opponent_team_id, {})
             if not opp_mults:
@@ -1043,28 +1045,26 @@ def sm_match(fixture_id):
             for p in players:
                 detailed_pos = p.get("detailed_position_id")
                 position_id  = p.get("position_id")
-                from .positional_concessions import GRANULAR_POSITION_MAP, BROAD_MAP, apply_concession_multiplier
-                pos_code = GRANULAR_POSITION_MAP.get(detailed_pos, (None, None))[0]
+                pos_code = _GPM.get(detailed_pos, (None, None))[0]
                 if not pos_code and position_id:
                     pos_code = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
                 if not pos_code:
                     result.append(p)
                     continue
-                _, a_mult, a_flag = apply_concession_multiplier(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
-                _, g_mult, g_flag = apply_concession_multiplier(p.get("goal_score") or 0, pos_code, opp_mults, "goal")
-                _, s_mult, s_flag = apply_concession_multiplier(p.get("sot_score") or 0, pos_code, opp_mults, "sot")
+                a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
+                g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal")
+                _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot")
                 overall_flag = None
-                if a_flag == "HIGH" or g_flag == "HIGH":   overall_flag = "HIGH"
+                if a_flag == "HIGH" or g_flag == "HIGH":    overall_flag = "HIGH"
                 elif a_flag or g_flag:                      overall_flag = "MEDIUM"
                 result.append({
                     **p,
-                    "assist_index":          round(a_mult, 3),
-                    "goal_score":            round(g_mult, 3),
+                    "assist_index":          round(a_adj, 3),
+                    "goal_score":            round(g_adj, 3),
                     "assist_flag":           a_flag,
                     "goal_flag":             g_flag,
                     "shots_flag":            s_flag,
                     "concession_flag":       overall_flag,
-                    "concession_multiplier": round(max(a_mult, g_mult) if (a_mult and g_mult) else 1.0, 2),
                 })
             return result
 
