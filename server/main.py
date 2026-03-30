@@ -997,6 +997,40 @@ def sm_lineups_today():
     return jsonify({"fixture_availability": availability, "cached": False, "active_count": len(active_fids)})
 
 
+from .positional_concessions import GRANULAR_POSITION_MAP as _GPM, apply_concession_multiplier as _acm
+
+def _apply_pe_flags(players, opponent_team_id, concession_mults):
+    opp_mults = concession_mults.get(opponent_team_id, {})
+    if not opp_mults:
+        return players
+    result = []
+    for p in players:
+        detailed_pos = p.get("detailed_position_id")
+        position_id  = p.get("position_id")
+        pos_code = _GPM.get(detailed_pos, (None, None))[0]
+        if not pos_code and position_id:
+            pos_code = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
+        if not pos_code:
+            result.append(p)
+            continue
+        a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
+        g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal")
+        _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot")
+        overall_flag = None
+        if a_flag == "HIGH" or g_flag == "HIGH":    overall_flag = "HIGH"
+        elif a_flag or g_flag:                      overall_flag = "MEDIUM"
+        result.append({
+            **p,
+            "assist_index":    round(a_adj, 3),
+            "goal_score":      round(g_adj, 3),
+            "assist_flag":     a_flag,
+            "goal_flag":       g_flag,
+            "shots_flag":      s_flag,
+            "concession_flag": overall_flag,
+        })
+    return result
+
+
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
     try:
@@ -1033,41 +1067,8 @@ def sm_match(fixture_id):
         except Exception as e:
             log.warning(f"get_multipliers error {fixture_id}: {e}")
 
-        from .positional_concessions import GRANULAR_POSITION_MAP as _GPM, apply_concession_multiplier as _acm
-
-        def apply_pe(players, opponent_team_id):
-            opp_mults = concession_mults.get(opponent_team_id, {})
-            if not opp_mults:
-                return players
-            result = []
-            for p in players:
-                detailed_pos = p.get("detailed_position_id")
-                position_id  = p.get("position_id")
-                pos_code = _GPM.get(detailed_pos, (None, None))[0]
-                if not pos_code and position_id:
-                    pos_code = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
-                if not pos_code:
-                    result.append(p)
-                    continue
-                a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
-                g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal")
-                _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot")
-                overall_flag = None
-                if a_flag == "HIGH" or g_flag == "HIGH":    overall_flag = "HIGH"
-                elif a_flag or g_flag:                      overall_flag = "MEDIUM"
-                result.append({
-                    **p,
-                    "assist_index":    round(a_adj, 3),
-                    "goal_score":      round(g_adj, 3),
-                    "assist_flag":     a_flag,
-                    "goal_flag":       g_flag,
-                    "shots_flag":      s_flag,
-                    "concession_flag": overall_flag,
-                })
-            return result
-
-        home_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id)
-        away_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id)
+        home_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id, concession_mults)
+        away_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id, concession_mults)
 
         lineup_data = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
         try:
