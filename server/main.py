@@ -1018,11 +1018,55 @@ def sm_match(fixture_id):
         season_id   = LEAGUE_SEASON_MAP.get(league_id)
         season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
-        home_players = sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
-        away_players = sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True)
+        home_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id)
+        away_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id)
 
         home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
         away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
+
+        # ── Positional concession multipliers — cached per fixture ───────────
+        concession_mults = {}
+        try:
+            if season_id and league_id:
+                cache_key = f"mults_{fixture_id}"
+                if cache_key not in _cache:
+                    _cache[cache_key] = get_multipliers(fixture_id, season_id, league_id)
+                concession_mults = _cache[cache_key]
+        except Exception as e:
+            log.warning(f"get_multipliers error {fixture_id}: {e}")
+
+        def apply_pe(players, opponent_team_id):
+            opp_mults = concession_mults.get(opponent_team_id, {})
+            if not opp_mults:
+                return players
+            result = []
+            for p in players:
+                detailed_pos = p.get("detailed_position_id")
+                position_id  = p.get("position_id")
+                from .positional_concessions import GRANULAR_POSITION_MAP, BROAD_MAP, apply_concession_multiplier
+                pos_code = GRANULAR_POSITION_MAP.get(detailed_pos, (None, None))[0]
+                if not pos_code and position_id:
+                    pos_code = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
+                if not pos_code:
+                    result.append(p)
+                    continue
+                _, a_mult, a_flag = apply_concession_multiplier(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
+                _, g_mult, g_flag = apply_concession_multiplier(p.get("goal_score") or 0, pos_code, opp_mults, "goal")
+                _, s_mult, s_flag = apply_concession_multiplier(p.get("sot_score") or 0, pos_code, opp_mults, "sot")
+                overall_flag = None
+                if a_flag == "HIGH" or g_flag == "HIGH":   overall_flag = "HIGH"
+                elif a_flag or g_flag:                      overall_flag = "MEDIUM"
+                result.append({
+                    **p,
+                    "assist_index":          round(a_mult, 3),
+                    "goal_score":            round(g_mult, 3),
+                    "assist_flag":           a_flag,
+                    "goal_flag":             g_flag,
+                    "shots_flag":            s_flag,
+                    "concession_flag":       overall_flag,
+                    "concession_multiplier": round(max(a_mult, g_mult) if (a_mult and g_mult) else 1.0, 2),
+                })
+            return result
 
         lineup_data = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
         try:
