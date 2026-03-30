@@ -71,9 +71,10 @@ STAT_TYPE_SOT         = 86
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def _sm_get(endpoint, params=None):
-    p = {"api_token": SPORTMONKS_TOKEN}
+    headers = {"Authorization": SPORTMONKS_TOKEN}
+    p = {}
     if params: p.update(params)
-    r = requests.get(f"{BASE_URL}/{endpoint}", params=p)
+    r = requests.get(f"{BASE_URL}/{endpoint}", headers=headers, params=p, timeout=30)
     r.raise_for_status()
     return r.json().get("data", [])
 
