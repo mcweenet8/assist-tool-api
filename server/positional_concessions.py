@@ -219,7 +219,7 @@ def process_fixture(fixture_id, season_id, league_id):
     try:
         fixture_data = _sm_get(
             f"fixtures/{fixture_id}",
-            {"include": "events;lineups;participants;statistics"}
+            {"include": "events;lineups.details;participants"}
         )
     except Exception as e:
         print(f"  ERROR fetching fixture {fixture_id}: {e}")
@@ -233,15 +233,35 @@ def process_fixture(fixture_id, season_id, league_id):
     lineups = fixture.get("lineups", [])
     if isinstance(lineups, dict): lineups = lineups.get("data", [])
 
+    # Build position map AND extract per-player shots/SOT/BC from lineup details
     player_positions = {}
+    player_bc        = {}
+    player_shots     = {}
+    player_sot       = {}
+
     for player in lineups:
         pid = player.get("player_id")
-        if pid:
-            player_positions[pid] = {
-                "position_id":          player.get("position_id"),
-                "detailed_position_id": player.get("formation_position"),
-                "team_id":              player.get("team_id"),
-            }
+        if not pid:
+            continue
+
+        player_positions[pid] = {
+            "position_id":          player.get("position_id"),
+            "detailed_position_id": player.get("formation_position"),
+            "team_id":              player.get("team_id"),
+        }
+
+        details = player.get("details", [])
+        if isinstance(details, dict): details = details.get("data", [])
+
+        for d in details:
+            type_id = d.get("type_id")
+            val     = d.get("data", {}).get("value", 0) or 0
+            if type_id == 580:                  # big chances created
+                player_bc[pid]    = player_bc.get(pid, 0)    + val
+            elif type_id == STAT_TYPE_SHOTS_TOTAL:  # shots total (42)
+                player_shots[pid] = player_shots.get(pid, 0) + val
+            elif type_id == STAT_TYPE_SOT:          # shots on target (86)
+                player_sot[pid]   = player_sot.get(pid, 0)   + val
 
     participants = fixture.get("participants", [])
     if isinstance(participants, dict): participants = participants.get("data", [])
@@ -264,29 +284,6 @@ def process_fixture(fixture_id, season_id, league_id):
 
     def is_home(team_id):
         return team_id == home_team_id
-
-    statistics = fixture.get("statistics", [])
-    if isinstance(statistics, dict): statistics = statistics.get("data", [])
-
-    # Build per-player stats from fixture statistics
-    # type_id 580 = big chances created, 42 = shots total, 86 = shots on target
-    player_bc    = {}
-    player_shots = {}
-    player_sot   = {}
-
-    for stat in statistics:
-        pid = stat.get("player_id")
-        if not pid:
-            continue
-        type_id = stat.get("type_id")
-        val = stat.get("data", {}).get("value", 0) or 0
-
-        if type_id == 580:
-            player_bc[pid]    = player_bc.get(pid, 0)    + val
-        elif type_id == STAT_TYPE_SHOTS_TOTAL:
-            player_shots[pid] = player_shots.get(pid, 0) + val
-        elif type_id == STAT_TYPE_SOT:
-            player_sot[pid]   = player_sot.get(pid, 0)   + val
 
     broad_accum    = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     granular_accum = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
