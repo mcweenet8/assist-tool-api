@@ -55,13 +55,6 @@ def grade_color(score):
 
 
 def _conversion_modifier(assists_total, key_passes_total, league_avg_conversion):
-    """
-    Dampen or boost assist index based on actual conversion rate.
-    conversion_rate = assists / key_passes
-    modifier = clamp(conversion_rate / league_avg, 0.70, 1.30)
-    Players who convert well get a small boost.
-    Players who create a lot but rarely assist get dampened.
-    """
     if not key_passes_total or key_passes_total < 10:
         return 1.0
     if not assists_total:
@@ -175,8 +168,8 @@ def calculate_goal_score(game_sot, minutes, xg_data, baseline):
     goals_per90 = baseline.get("goals_per90") or 0
 
     score = (
-        sot_per90   * GOAL_WEIGHTS["sot_per90"] +
-        goals_per90 * GOAL_WEIGHTS["goals_p90"]
+        sot_per90   * GOAL_WEIGHTS["sot_ratio"] +
+        goals_per90 * GOAL_WEIGHTS["goals_ratio"]
     )
 
     components = {
@@ -425,7 +418,7 @@ def get_season_scores():
     """
     Calculate season-long DC scores for all players from player_baselines.
     Minimum 180 minutes + 2 appearances.
-    Includes conversion rate modifier on assist index.
+    Includes shots/SOT per90 and PE flags.
     """
     try:
         # Fetch all rows with pagination
@@ -476,14 +469,16 @@ def get_season_scores():
             return GRANULAR_POS_MAP.get(row.get("detailed_position_id")) or \
                    BROAD_POS_MAP.get(row.get("position_id"), "MID")
 
-        # ── Step 1: League averages — overall AND by position ─────────────────
+        # ── Step 1: League averages ───────────────────────────────────────────
         league_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
-            "goals_per90": [], "pass_acc": [], "conversion": [], "bc_per90": [], "cca": []
+            "shots_per90": [], "goals_per90": [], "pass_acc": [],
+            "conversion": [], "bc_per90": [], "cca": []
         })
         pos_stats = defaultdict(lambda: {
             "kp_per90": [], "acc_cross_per90": [], "sot_per90": [],
-            "goals_per90": [], "pass_acc": [], "bc_per90": [], "cca": []
+            "shots_per90": [], "goals_per90": [], "pass_acc": [],
+            "bc_per90": [], "cca": []
         })
 
         for row in rows:
@@ -500,6 +495,9 @@ def get_season_scores():
             if row.get("sot_per90"):
                 league_stats[lid]["sot_per90"].append(row["sot_per90"])
                 pos_stats[(lid,pos)]["sot_per90"].append(row["sot_per90"])
+            if row.get("shots_per90"):
+                league_stats[lid]["shots_per90"].append(row["shots_per90"])
+                pos_stats[(lid,pos)]["shots_per90"].append(row["shots_per90"])
             if row.get("goals_per90"):
                 league_stats[lid]["goals_per90"].append(row["goals_per90"])
                 pos_stats[(lid,pos)]["goals_per90"].append(row["goals_per90"])
@@ -527,6 +525,7 @@ def get_season_scores():
                 "kp_per90":    avg(stats["kp_per90"]),
                 "cross_per90": avg(stats["acc_cross_per90"]),
                 "sot_per90":   avg(stats["sot_per90"]),
+                "shots_per90": avg(stats["shots_per90"]),
                 "goals_per90": avg(stats["goals_per90"]),
                 "pass_acc":    avg(stats["pass_acc"]),
                 "conversion":  avg(stats["conversion"]),
@@ -534,7 +533,6 @@ def get_season_scores():
                 "cca":         avg(stats["cca"]),
             }
 
-        # Positional averages — fallback to league avg if fewer than 5 samples
         pos_avgs = {}
         for (lid, pos), stats in pos_stats.items():
             fb = league_avgs.get(lid, {})
@@ -542,13 +540,14 @@ def get_season_scores():
                 "kp_per90":    avg(stats["kp_per90"])        if len(stats["kp_per90"])        >= 5 else fb.get("kp_per90",    0.001),
                 "cross_per90": avg(stats["acc_cross_per90"]) if len(stats["acc_cross_per90"]) >= 5 else fb.get("cross_per90", 0.001),
                 "sot_per90":   avg(stats["sot_per90"])       if len(stats["sot_per90"])       >= 5 else fb.get("sot_per90",   0.001),
+                "shots_per90": avg(stats["shots_per90"])     if len(stats["shots_per90"])     >= 5 else fb.get("shots_per90", 0.001),
                 "goals_per90": avg(stats["goals_per90"])     if len(stats["goals_per90"])     >= 5 else fb.get("goals_per90", 0.001),
                 "pass_acc":    avg(stats["pass_acc"])        if len(stats["pass_acc"])        >= 5 else fb.get("pass_acc",    0.001),
                 "bc_per90":    avg(stats["bc_per90"])        if len(stats["bc_per90"])        >= 5 else fb.get("bc_per90",    0.001),
                 "cca":         avg(stats["cca"])             if len(stats["cca"])             >= 5 else fb.get("cca",         0.001),
             }
 
-        # ── Step 2: Dynamic threshold per league ─────────────────────────────
+        # ── Step 2: Dynamic threshold per league ──────────────────────────────
         from collections import defaultdict as _dd2
         league_max_mins = _dd2(int)
         for _r in rows:
@@ -577,17 +576,17 @@ def get_season_scores():
             if not avgs:
                 continue
 
-            pos  = get_pos(row)
-            pavgs = pos_avgs.get((lid, pos), avgs)  # positional avg, fallback to league
+            pos   = get_pos(row)
+            pavgs = pos_avgs.get((lid, pos), avgs)
 
             kp_per90    = row.get("kp_per90")            or 0
             cross_per90 = row.get("acc_cross_per90")     or 0
             sot_per90   = row.get("sot_per90")           or 0
+            shots_per90 = row.get("shots_per90")         or 0
             goals_per90 = row.get("goals_per90")         or 0
             pass_acc    = row.get("pass_accuracy_baseline") or avgs.get("pass_acc", 0.001)
 
-            # Assist ratios — compare against overall league averages
-            # (creative output is cross-positional — DEF creators should rank vs whole league)
+            # Assist ratios
             kp_ratio    = kp_per90    / avgs.get("kp_per90",    0.001)
             cross_ratio = cross_per90 / avgs.get("cross_per90", 0.001)
             pa_ratio    = pass_acc    / avgs.get("pass_acc",     0.001)
@@ -596,12 +595,12 @@ def get_season_scores():
             cca_val     = cca_map.get(row.get("player_id"), 0) or 0
             cca_ratio   = cca_val     / avgs.get("cca",          0.001)
 
-            # Goal ratios — overall league averages for now
-            # TODO: Switch to lineup-derived position once player_match_log has 10+ match days
-            sot_ratio   = sot_per90   / avgs.get("sot_per90",   0.001)
-            goals_ratio = goals_per90 / avgs.get("goals_per90", 0.001)
+            # Goal ratios
+            sot_ratio    = sot_per90    / avgs.get("sot_per90",   0.001)
+            shots_ratio  = shots_per90  / avgs.get("shots_per90", 0.001)
+            goals_ratio  = goals_per90  / avgs.get("goals_per90", 0.001)
 
-            # DC Assist Index — GKs excluded from assist rankings
+            # DC Assist Index
             if pos == "GK":
                 assist_index = 0.0
             else:
@@ -613,7 +612,7 @@ def get_season_scores():
                     cca_ratio   * ASSIST_WEIGHTS["cca_ratio"]
                 ) * ASSIST_SCALE, 4)
 
-            # DC Goal Score — GKs excluded from goal rankings
+            # DC Goal Score
             if pos == "GK":
                 goal_score = 0.0
             else:
@@ -621,6 +620,15 @@ def get_season_scores():
                     sot_ratio   * GOAL_WEIGHTS["sot_ratio"] +
                     goals_ratio * GOAL_WEIGHTS["goals_ratio"]
                 ) * GOAL_SCALE, 4)
+
+            # DC Shots Score — volume × accuracy blend, GKs excluded
+            # shots_score = shots_ratio (volume) * sot_ratio (accuracy) blend
+            if pos == "GK":
+                shots_score = 0.0
+                sot_score   = 0.0
+            else:
+                shots_score = round(shots_ratio * 1.0, 4)
+                sot_score   = round(sot_ratio   * 1.0, 4)
 
             tsoa = calculate_tsoa(assist_index, goal_score, kp_per90, sot_per90)
 
@@ -636,26 +644,33 @@ def get_season_scores():
                 "kp_per90":             kp_per90,
                 "acc_cross_per90":      cross_per90,
                 "sot_per90":            sot_per90,
+                "shots_per90":          shots_per90,
                 "goals_per90":          goals_per90,
                 "pass_accuracy":        pass_acc,
                 "assists_total":        row.get("assists_total") or 0,
                 "big_chances_created":  row.get("big_chances_created") or 0,
                 "big_chances_per90":    row.get("big_chances_per90") or 0,
+                "shots_total":          row.get("shots_total") or 0,
+                "sot_total":            row.get("sot_total") or 0,
                 "appearances":          row.get("appearances") or 0,
                 "league_avg_kp":        round(avgs.get("kp_per90", 0), 3),
                 "league_avg_cross":     round(avgs.get("cross_per90", 0), 3),
                 "league_avg_sot":       round(avgs.get("sot_per90", 0), 3),
+                "league_avg_shots":     round(avgs.get("shots_per90", 0), 3),
                 "kp_ratio":             round(kp_ratio, 3),
                 "cross_ratio":          round(cross_ratio, 3),
                 "bc_ratio":             round(bc_ratio, 3),
                 "pass_acc_ratio":       round(pa_ratio, 3),
                 "conversion_modifier":  1.0,
                 "sot_ratio":            round(sot_ratio, 3),
+                "shots_ratio":          round(shots_ratio, 3),
                 "goals_ratio":          round(goals_ratio, 3),
                 "cca_per_fixture":      round(cca_val, 4),
                 "cca_ratio":            round(cca_ratio, 3),
                 "assist_index":         assist_index,
                 "goal_score":           goal_score,
+                "shots_score":          shots_score,
+                "sot_score":            sot_score,
                 "tsoa_score":           tsoa,
                 "assist_grade":         grade_color(assist_index or 0),
                 "goal_grade":           grade_color(goal_score or 0),
