@@ -857,6 +857,7 @@ def sm_team_form(team_id):
     """
     import requests as _req
     from supabase import create_client as _create_client
+    from datetime import datetime as _dt, timedelta as _td
 
     cache_key = f"team_form_{team_id}"
     cached = _cache.get(cache_key)
@@ -884,8 +885,8 @@ def sm_team_form(team_id):
 
         league_id = res.data[0]["league_id"]
 
-        today = datetime.utcnow()
-        start = (today - timedelta(days=60)).strftime("%Y-%m-%d")
+        today = _dt.utcnow()
+        start = (today - _td(days=60)).strftime("%Y-%m-%d")
         end   = today.strftime("%Y-%m-%d")
 
         r = _req.get(
