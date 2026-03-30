@@ -568,11 +568,18 @@ def sm_results():
         summaries = {}
         for date, date_rows in by_date.items():
             # Exclude DNPs from all calculations
-            played    = [r for r in date_rows if not r.get("dnp")]
+            played       = [r for r in date_rows if not r.get("dnp")]
             contributors = [r for r in played if r.get("had_contribution")]
+
+            # Rank lists — contributors only, for Hit% (top_n_rate divides by 20)
             assist_ranks = [r["sm_assist_rank"] for r in contributors if r.get("sm_assist_rank")]
             goal_ranks   = [r["sm_goal_rank"]   for r in contributors if r.get("sm_goal_rank")]
             tsoa_ranks   = [r["sm_tsoa_rank"]   for r in contributors if r.get("sm_tsoa_rank")]
+
+            # Median rank — all played players ranked in top 20 (including non-contributors)
+            # This gives a truer picture of model accuracy
+            assist_all_top20 = [r["sm_assist_rank"] for r in played if r.get("sm_assist_rank") and r["sm_assist_rank"] <= 20]
+            goal_all_top20   = [r["sm_goal_rank"]   for r in played if r.get("sm_goal_rank")   and r["sm_goal_rank"]   <= 20]
 
             # Count DNPs that were in our top 20 — shown separately for transparency
             dnp_rows = [r for r in date_rows if r.get("dnp")]
@@ -1480,6 +1487,48 @@ def nightly_run():
                 "dnp":              mins is not None and mins == 0,
                 "outcome_recorded": True,
             })
+
+        # Also record top 20 non-contributors so Hit% is accurate
+        # These are players ranked in top 20 who didn't score or assist
+        recorded_pids = set(all_pids)
+        for market_name, ranked_list, rank_map in [
+            ("assist", assist_ranked, assist_rank_map),
+            ("goal",   goal_ranked,   goal_rank_map),
+        ]:
+            for i, p in enumerate(ranked_list[:20]):
+                pid = p.get("player_id")
+                if not pid or pid in recorded_pids: continue
+                # Find which fixture this player is in
+                tid = str(p.get("team_id", ""))
+                fid = next((
+                    m["match_id"] for m in today_fixtures
+                    if str(m.get("home_id","")) == tid or str(m.get("away_id","")) == tid
+                ), None)
+                if not fid: continue
+                ctx  = nightly_context.get(str(pid), {})
+                mins = minutes_lookup.get(pid, None)
+                outcome_rows.append({
+                    "game_date":        today,
+                    "fixture_id":       fid,
+                    "player_id":        pid,
+                    "player_name":      p.get("player_name"),
+                    "team_name":        p.get("team_name"),
+                    "league_id":        p.get("league_id"),
+                    "sm_assist_rank":   assist_rank_map.get(pid),
+                    "sm_goal_rank":     goal_rank_map.get(pid),
+                    "sm_tsoa_rank":     tsoa_rank_map.get(pid),
+                    "assist_index":     p.get("assist_index"),
+                    "goal_score":       p.get("goal_score"),
+                    "tsoa_score":       p.get("tsoa_score"),
+                    "concession_flag":  ctx.get("concession_flag"),
+                    "actual_goals":     0,
+                    "actual_assists":   0,
+                    "had_contribution": False,
+                    "minutes_played":   mins,
+                    "dnp":              mins is not None and mins == 0,
+                    "outcome_recorded": True,
+                })
+                recorded_pids.add(pid)
 
         if outcome_rows:
             for i in range(0, len(outcome_rows), 100):
