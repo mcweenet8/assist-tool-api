@@ -729,7 +729,8 @@ def _fetch_continental_schedule(competition_key):
                 state_id = fix.get("state_id")
                 if state_id == 5:         return "finished"
                 if state_id in [2, 3, 4]: return "live"
-                return "upcoming"
+                if state_id == 1:         return "upcoming"
+                return "finished"  # state_id 7, 8 etc = cancelled/awarded/other — treat as finished
 
             h_id1, h_name1, h_logo1, a_id1, a_name1, a_logo1 = parse_participants(leg1)
             h_id2, h_name2, h_logo2, a_id2, a_name2, a_logo2 = parse_participants(leg2)
