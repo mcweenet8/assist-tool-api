@@ -151,6 +151,7 @@ def _calculate_baseline(player, details, season_id, team_id=None, team_name=None
     tot_passes   = _extract_stat(details, TYPE_IDS["PASSES"])
     pass_acc_pct = _extract_stat(details, TYPE_IDS["ACCURATE_PASSES_PERCENTAGE"])
     sot          = _extract_stat(details, TYPE_IDS["SHOTS_ON_TARGET"])
+    shots_total  = _extract_stat(details, TYPE_IDS["SHOTS_TOTAL"])
     goals        = _extract_stat(details, TYPE_IDS["GOALS"])
     dribbles     = _extract_stat(details, TYPE_IDS["SUCCESSFUL_DRIBBLES"])
     assists      = _extract_stat(details, TYPE_IDS["ASSISTS"])
@@ -188,6 +189,7 @@ def _calculate_baseline(player, details, season_id, team_id=None, team_name=None
         "key_passes_total":       key_passes   or 0,
         "acc_crosses_total":      acc_crosses  or 0,
         "sot_total":              sot          or 0,
+        "shots_total":            shots_total  or 0,
         "goals_total":            goals        or 0,
         "assists_total":          assists      or 0,
         "big_chances_created":    big_chances  or 0,
@@ -195,6 +197,7 @@ def _calculate_baseline(player, details, season_id, team_id=None, team_name=None
         "kp_per90":               per90(key_passes),
         "acc_cross_per90":        per90(acc_crosses),
         "sot_per90":              per90(sot),
+        "shots_per90":            per90(shots_total),
         "goals_per90":            per90(goals),
         "assists_per90":          per90(assists),
         "big_chances_per90":      per90(big_chances),
