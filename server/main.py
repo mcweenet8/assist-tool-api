@@ -851,12 +851,16 @@ def sm_match(fixture_id):
 def sm_team_form(team_id):
     """
     Returns last 5 finished results for a team.
-    Fetches last 60 days from SM, cached 24hrs per team.
+    Looks up team's league_id from player_baselines in Supabase.
+    Fetches last 60 days for that league, filters by team client-side.
+    Cached 24hrs per team.
     """
     import requests as _req
+    from supabase import create_client as _create_client
+
     cache_key = f"team_form_{team_id}"
     cached = _cache.get(cache_key)
-    if cached:
+    if cached is not None:
         return jsonify({"form": cached, "cached": True})
 
     token = os.environ.get("SPORTMONKS_API_TOKEN")
@@ -864,17 +868,33 @@ def sm_team_form(team_id):
         return jsonify({"form": [], "error": "no token"})
 
     try:
-        today     = datetime.utcnow()
-        start     = (today - timedelta(days=60)).strftime("%Y-%m-%d")
-        end       = today.strftime("%Y-%m-%d")
+        # Look up league_id from player_baselines
+        sb = _create_client(
+            os.environ.get("SUPABASE_URL"),
+            os.environ.get("SUPABASE_SERVICE_KEY")
+        )
+        res = sb.table("player_baselines")\
+            .select("league_id")\
+            .eq("team_id", team_id)\
+            .limit(1)\
+            .execute()
+
+        if not res.data:
+            return jsonify({"form": [], "error": "team not found in baselines"})
+
+        league_id = res.data[0]["league_id"]
+
+        today = datetime.utcnow()
+        start = (today - timedelta(days=60)).strftime("%Y-%m-%d")
+        end   = today.strftime("%Y-%m-%d")
 
         r = _req.get(
             f"https://api.sportmonks.com/v3/football/fixtures/between/{start}/{end}",
             params={
                 "api_token": token,
-                "filters":   f"fixtureTeams:{team_id}",
+                "filters":   f"fixtureLeagues:{league_id}",
                 "include":   "participants;scores;state",
-                "per_page":  25,
+                "per_page":  100,
             },
             timeout=15
         )
@@ -882,11 +902,10 @@ def sm_team_form(team_id):
             return jsonify({"form": [], "error": f"SM returned {r.status_code}"})
 
         raw = r.json().get("data", [])
-        if isinstance(raw, dict): raw = raw.get("data", [])
 
         results = []
         for fix in raw:
-            if fix.get("state_id") != 5: continue  # finished only
+            if fix.get("state_id") != 5: continue
 
             participants = fix.get("participants", [])
             if isinstance(participants, dict): participants = participants.get("data", [])
@@ -899,14 +918,18 @@ def sm_team_form(team_id):
 
             if not home_team or not away_team: continue
 
-            home_id   = home_team.get("id")
-            away_id   = away_team.get("id")
+            home_id = home_team.get("id")
+            away_id = away_team.get("id")
+
+            if str(home_id) != str(team_id) and str(away_id) != str(team_id):
+                continue
+
             home_name = home_team.get("name", "")
             away_name = away_team.get("name", "")
 
-            scores    = fix.get("scores", [])
+            scores  = fix.get("scores", [])
             if isinstance(scores, dict): scores = scores.get("data", [])
-            current   = [s for s in scores if s.get("description") == "CURRENT"]
+            current = [s for s in scores if s.get("description") == "CURRENT"]
             home_goals = away_goals = None
             for s in current:
                 sd = s.get("score", {})
@@ -926,17 +949,16 @@ def sm_team_form(team_id):
             else:         result = "D"
 
             results.append({
-                "fixture_id": fix.get("id"),
-                "date":       fix.get("starting_at", "")[:10],
-                "opponent":   opponent,
+                "fixture_id":  fix.get("id"),
+                "date":        fix.get("starting_at", "")[:10],
+                "opponent":    opponent,
                 "opponent_id": opp_id,
-                "gf":         gf,
-                "ga":         ga,
-                "result":     result,
-                "home":       is_home,
+                "gf":          gf,
+                "ga":          ga,
+                "result":      result,
+                "home":        is_home,
             })
 
-        # Sort by date descending, take last 5
         results.sort(key=lambda x: x["date"], reverse=True)
         form = results[:5]
 
