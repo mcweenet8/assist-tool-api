@@ -48,6 +48,23 @@ BROAD_MAP = {
     "FWD": "FWD",
 }
 
+# ── MINIMUM SAMPLE THRESHOLDS — rolling gate before PE flags fire ─────────────
+# GP minimum before any flag is assigned — DEF needs more games (low base rate)
+MIN_GP = {
+    "GK":  999,  # never flag GK
+    "DEF": 8,    # DEF base rate is low — needs more games for reliable signal
+    "MID": 5,
+    "FWD": 5,
+}
+
+# Minimum absolute concessions (goals + assists combined) before flagging
+MIN_CONCESSIONS = {
+    "GK":  999,
+    "DEF": 2,
+    "MID": 2,
+    "FWD": 2,
+}
+
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def _sm_get(endpoint, params=None):
@@ -79,11 +96,6 @@ def _mark_processed(fixture_id):
 
 
 def _flush_broad(team_id, season_id, league_id, accum):
-    """
-    Flush accumulated broad position data for one team in one fixture.
-    accum = { broad_position: { goals, goals_home, goals_away, assists, ... } }
-    Single GET + upsert per position — 4 calls max per team instead of one per event.
-    """
     for broad_pos, delta in accum.items():
         existing = supabase.table("positional_concessions_broad")\
             .select("*")\
@@ -127,10 +139,6 @@ def _flush_broad(team_id, season_id, league_id, accum):
 
 
 def _flush_granular(team_id, season_id, league_id, accum):
-    """
-    Flush accumulated granular position data for one team in one fixture.
-    accum = { position_id: { position_code, broad_pos, goals, ... } }
-    """
     for position_id, delta in accum.items():
         existing = supabase.table("positional_concessions_granular")\
             .select("*")\
@@ -195,7 +203,6 @@ def process_fixture(fixture_id, season_id, league_id):
 
     fixture = fixture_data if isinstance(fixture_data, dict) else fixture_data[0]
 
-    # ── Build player → position + team lookup from lineups ──
     lineups = fixture.get("lineups", [])
     if isinstance(lineups, dict): lineups = lineups.get("data", [])
 
@@ -209,7 +216,6 @@ def process_fixture(fixture_id, season_id, league_id):
                 "team_id":              player.get("team_id"),
             }
 
-    # ── Identify home/away teams ──
     participants = fixture.get("participants", [])
     if isinstance(participants, dict): participants = participants.get("data", [])
 
@@ -232,7 +238,6 @@ def process_fixture(fixture_id, season_id, league_id):
     def is_home(team_id):
         return team_id == home_team_id
 
-    # ── Pull BC per player from statistics ──
     statistics = fixture.get("statistics", [])
     if isinstance(statistics, dict): statistics = statistics.get("data", [])
 
@@ -244,8 +249,6 @@ def process_fixture(fixture_id, season_id, league_id):
             if pid:
                 player_bc[pid] = player_bc.get(pid, 0) + val
 
-    # ── Accumulate all deltas in memory ──
-    # Structure: { team_id: { broad_pos: { goals, goals_home, ... } } }
     broad_accum    = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     granular_accum = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     games_teams    = set()
@@ -253,7 +256,6 @@ def process_fixture(fixture_id, season_id, league_id):
     events = fixture.get("events", [])
     if isinstance(events, dict): events = events.get("data", [])
 
-    # Both teams always get games_played incremented regardless of goals
     if home_team_id: games_teams.add(home_team_id)
     if away_team_id: games_teams.add(away_team_id)
 
@@ -273,7 +275,6 @@ def process_fixture(fixture_id, season_id, league_id):
         h = 1 if opp_is_home else 0
         a = 0 if opp_is_home else 1
 
-        # ── SCORER ──
         if scorer_id and scorer_id in player_positions:
             pos_info = player_positions[scorer_id]
             pos_code, broad = _get_position_info(
@@ -292,7 +293,6 @@ def process_fixture(fixture_id, season_id, league_id):
                 granular_accum[opposing_team][did]["position_code"] = pos_code
                 granular_accum[opposing_team][did]["broad_pos"]     = broad
 
-        # ── ASSISTER ──
         if assister_id and assister_id in player_positions:
             pos_info = player_positions[assister_id]
             pos_code, broad = _get_position_info(
@@ -311,7 +311,6 @@ def process_fixture(fixture_id, season_id, league_id):
                 granular_accum[opposing_team][did]["position_code"] = pos_code
                 granular_accum[opposing_team][did]["broad_pos"]     = broad
 
-    # ── BC conceded ──
     for pid, bc_count in player_bc.items():
         if pid not in player_positions or bc_count == 0:
             continue
@@ -340,12 +339,10 @@ def process_fixture(fixture_id, season_id, league_id):
             granular_accum[opposing_team][did]["position_code"] = pos_code
             granular_accum[opposing_team][did]["broad_pos"]     = broad
 
-    # ── games_played increment for all 4 positions per team ──
     for team_id in games_teams:
         for broad in ["GK", "DEF", "MID", "FWD"]:
             broad_accum[team_id][broad]["games"] += 1
 
-    # ── Flush all accumulated data — one write per team/position ──
     for team_id, pos_data in broad_accum.items():
         _flush_broad(team_id, season_id, league_id, pos_data)
 
@@ -520,6 +517,11 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_broad.get(bp, {})
             gp  = row["games_played"] or 1
 
+            # ── Rolling sample gate ──────────────────────────────────────────
+            min_gp   = MIN_GP.get(bp, 5)
+            min_conc = MIN_CONCESSIONS.get(bp, 2)
+            total_concessions = row["goals_conceded"] + row["assists_conceded"]
+
             gpg  = row["goals_conceded"]     / gp
             apg  = row["assists_conceded"]   / gp
             bcpg = row.get("bc_conceded", 0) / gp
@@ -531,17 +533,18 @@ def get_multipliers(fixture_id, season_id, league_id):
             assist_mult = apg  / avg_a
             bc_mult     = bcpg / avg_b
 
-            # Absolute thresholds by position
             ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
             ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
             abs_goal_flag   = gpg >= ABS_GOAL_THRESH.get(bp, 99)
             abs_assist_flag = apg >= ABS_ASSIST_THRESH.get(bp, 99)
 
+            # Only assign flag if sample meets minimum thresholds
             flag = None
-            if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
-                flag = "HIGH"
-            elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
-                flag = "MEDIUM"
+            if gp >= min_gp and total_concessions >= min_conc:
+                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
+                    flag = "HIGH"
+                elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
+                    flag = "MEDIUM"
 
             result[team_id]["broad"][bp] = {
                 "goal_multiplier":   round(goal_mult, 2),
@@ -549,7 +552,7 @@ def get_multipliers(fixture_id, season_id, league_id):
                 "bc_multiplier":     round(bc_mult, 2),
                 "goals_conceded":    row["goals_conceded"],
                 "assists_conceded":  row["assists_conceded"],
-                "games_played":      row["games_played"],
+                "games_played":      gp,
                 "flag":              flag,
                 "location":          "home" if team_is_home else "away",
             }
@@ -563,6 +566,11 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_granular.get(pc, {})
             gp  = row["games_played"] or 1
 
+            broad_for_pc = BROAD_MAP.get(pc, "MID")
+            min_gp   = MIN_GP.get(broad_for_pc, 5)
+            min_conc = MIN_CONCESSIONS.get(broad_for_pc, 2)
+            total_concessions = row["goals_conceded"] + row["assists_conceded"]
+
             gpg  = row["goals_conceded"]              / gp
             apg  = row["assists_conceded"]            / gp
             bcpg = row.get("bc_conceded", 0)          / gp
@@ -574,18 +582,18 @@ def get_multipliers(fixture_id, season_id, league_id):
             assist_mult = apg  / max(avg_a, 0.001)
             bc_mult     = bcpg / max(avg_b, 0.001)
 
-            # Use broad position for absolute thresholds
-            broad_for_pc = BROAD_MAP.get(pc, "MID")
             ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
             ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
             abs_goal_flag   = gpg >= ABS_GOAL_THRESH.get(broad_for_pc, 99)
             abs_assist_flag = apg >= ABS_ASSIST_THRESH.get(broad_for_pc, 99)
 
+            # Only assign flag if sample meets minimum thresholds
             flag = None
-            if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
-                flag = "HIGH"
-            elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
-                flag = "MEDIUM"
+            if gp >= min_gp and total_concessions >= min_conc:
+                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
+                    flag = "HIGH"
+                elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
+                    flag = "MEDIUM"
 
             result[team_id]["granular"][pc] = {
                 "goal_multiplier":   round(goal_mult, 2),
@@ -593,7 +601,7 @@ def get_multipliers(fixture_id, season_id, league_id):
                 "bc_multiplier":     round(bc_mult, 2),
                 "goals_conceded":    row["goals_conceded"],
                 "assists_conceded":  row["assists_conceded"],
-                "games_played":      row["games_played"],
+                "games_played":      gp,
                 "flag":              flag,
                 "location":          "home" if team_is_home else "away",
             }
