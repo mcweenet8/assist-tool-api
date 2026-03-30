@@ -645,6 +645,217 @@ LEAGUE_SEASON_MAP = {
 }
 
 
+# ── Continental competitions ──────────────────────────────────────────────────
+
+CONTINENTAL_COMPETITIONS = {
+    "ucl":  {"league_id": 2,    "season_id": 25580, "name": "Champions League",        "short": "UCL"},
+    "uel":  {"league_id": 5,    "season_id": 25582, "name": "Europa League",            "short": "UEL"},
+    "uecl": {"league_id": 2286, "season_id": 25581, "name": "Europa Conference League", "short": "UECL"},
+}
+
+
+def _fetch_continental_schedule(competition_key):
+    """
+    Fetches full schedule for a continental competition from SM.
+    Returns structured data: stages, bracket, upcoming_fixtures.
+    """
+    import requests as req
+
+    comp   = CONTINENTAL_COMPETITIONS[competition_key]
+    token  = os.environ.get("SPORTMONKS_API_TOKEN")
+    url    = f"https://api.sportmonks.com/v3/football/schedules/seasons/{comp['season_id']}"
+    params = {"api_token": token}
+
+    r = req.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    raw_stages = r.json().get("data", [])
+
+    stages            = []
+    upcoming_fixtures = []
+    bracket           = []
+
+    for stage in raw_stages:
+        stage_obj = {
+            "stage_id":    stage["id"],
+            "name":        stage["name"],
+            "finished":    stage["finished"],
+            "is_current":  stage["is_current"],
+            "sort_order":  stage["sort_order"],
+            "starting_at": stage.get("starting_at"),
+            "ending_at":   stage.get("ending_at"),
+        }
+        stages.append(stage_obj)
+
+        aggregates = stage.get("aggregates", [])
+        if not aggregates:
+            continue
+
+        for agg in aggregates:
+            fixtures = agg.get("fixtures", [])
+
+            leg1 = next((f for f in fixtures if f.get("leg") == "1/2"), None)
+            leg2 = next((f for f in fixtures if f.get("leg") == "2/2"), None)
+            # Handle single-leg fixtures (e.g. Final)
+            if not leg1 and not leg2 and fixtures:
+                leg1 = fixtures[0]
+
+            def parse_participants(fix):
+                if not fix: return None, None, None, None, None, None
+                parts = fix.get("participants", [])
+                home  = next((p for p in parts if p.get("meta", {}).get("location") == "home"), None)
+                away  = next((p for p in parts if p.get("meta", {}).get("location") == "away"), None)
+                return (
+                    home.get("id")         if home else None,
+                    home.get("name")       if home else None,
+                    home.get("image_path") if home else None,
+                    away.get("id")         if away else None,
+                    away.get("name")       if away else None,
+                    away.get("image_path") if away else None,
+                )
+
+            def parse_score(fix):
+                if not fix: return None, None
+                scores  = fix.get("scores", [])
+                current = [s for s in scores if s.get("description") == "CURRENT"]
+                home_g = away_g = None
+                for s in current:
+                    sd = s.get("score", {})
+                    if sd.get("participant") == "home": home_g = sd.get("goals")
+                    elif sd.get("participant") == "away": away_g = sd.get("goals")
+                return home_g, away_g
+
+            def parse_state(fix):
+                if not fix: return "upcoming"
+                state_id = fix.get("state_id")
+                if state_id == 5:         return "finished"
+                if state_id in [2, 3, 4]: return "live"
+                return "upcoming"
+
+            h_id1, h_name1, h_logo1, a_id1, a_name1, a_logo1 = parse_participants(leg1)
+            h_id2, h_name2, h_logo2, a_id2, a_name2, a_logo2 = parse_participants(leg2)
+
+            # Canonical team1 = home team of leg1
+            team1_id   = h_id1   or a_id2
+            team1_name = h_name1 or a_name2
+            team1_logo = h_logo1 or a_logo2
+            team2_id   = a_id1   or h_id2
+            team2_name = a_name1 or h_name2
+            team2_logo = a_logo1 or h_logo2
+
+            leg1_h, leg1_a = parse_score(leg1)
+            leg2_h, leg2_a = parse_score(leg2)
+
+            bracket.append({
+                "aggregate_id":     agg["id"],
+                "stage_name":       stage["name"],
+                "stage_id":         stage["id"],
+                "competition":      comp["short"],
+                "team1_id":         team1_id,
+                "team1_name":       team1_name,
+                "team1_logo":       team1_logo,
+                "team2_id":         team2_id,
+                "team2_name":       team2_name,
+                "team2_logo":       team2_logo,
+                "aggregate_result": agg.get("result"),
+                "aggregate_detail": agg.get("detail", ""),
+                "winner_id":        agg.get("winner_participant_id"),
+                "leg1": {
+                    "fixture_id": leg1["id"] if leg1 else None,
+                    "home_goals": leg1_h,
+                    "away_goals": leg1_a,
+                    "date":       leg1.get("starting_at", "")[:10] if leg1 else None,
+                    "state":      parse_state(leg1),
+                } if leg1 else None,
+                "leg2": {
+                    "fixture_id": leg2["id"] if leg2 else None,
+                    "home_goals": leg2_h,
+                    "away_goals": leg2_a,
+                    "date":       leg2.get("starting_at", "")[:10] if leg2 else None,
+                    "state":      parse_state(leg2),
+                } if leg2 else None,
+            })
+
+            # Add upcoming/live legs to flat fixtures list
+            for fix in fixtures:
+                state = parse_state(fix)
+                if state in ["upcoming", "live"]:
+                    parts  = fix.get("participants", [])
+                    home_p = next((p for p in parts if p.get("meta", {}).get("location") == "home"), {})
+                    away_p = next((p for p in parts if p.get("meta", {}).get("location") == "away"), {})
+                    upcoming_fixtures.append({
+                        "match_id":         fix["id"],
+                        "kickoff":          fix.get("starting_at"),
+                        "home":             home_p.get("name", ""),
+                        "away":             away_p.get("name", ""),
+                        "home_id":          home_p.get("id"),
+                        "away_id":          away_p.get("id"),
+                        "home_logo":        home_p.get("image_path", ""),
+                        "away_logo":        away_p.get("image_path", ""),
+                        "competition":      comp["short"],
+                        "competition_name": comp["name"],
+                        "league_id":        comp["league_id"],
+                        "leg":              fix.get("leg"),
+                        "stage":            stage["name"],
+                        "live":             state == "live",
+                        "finished":         False,
+                        "state_id":         fix.get("state_id"),
+                    })
+
+    # Current stage = first unfinished by sort_order
+    current_stage = next(
+        (s for s in sorted(stages, key=lambda x: x["sort_order"]) if not s["finished"]),
+        stages[-1] if stages else None
+    )
+
+    return {
+        "competition":       comp["short"],
+        "competition_name":  comp["name"],
+        "league_id":         comp["league_id"],
+        "season_id":         comp["season_id"],
+        "stages":            stages,
+        "current_stage":     current_stage,
+        "bracket":           bracket,
+        "upcoming_fixtures": upcoming_fixtures,
+    }
+
+
+@app.route('/api/sm/continental/schedule', methods=['GET'])
+def sm_continental_schedule():
+    """
+    Returns full schedule + bracket for a continental competition.
+    Query param: ?competition=ucl|uel|uecl
+    Cached 1 hour per competition.
+    """
+    competition = request.args.get("competition", "ucl").lower()
+    if competition not in CONTINENTAL_COMPETITIONS:
+        return jsonify({"error": f"Unknown competition. Use: {list(CONTINENTAL_COMPETITIONS.keys())}"}), 400
+
+    cache_key      = f"continental_schedule_{competition}"
+    cache_time_key = f"continental_schedule_{competition}_updated"
+
+    cached = _cache.get(cache_key)
+    if cached:
+        try:
+            age = (datetime.now() - datetime.strptime(_cache[cache_time_key], "%Y-%m-%d %H:%M")).total_seconds()
+            if age < 3600:
+                return jsonify({**cached, "cached": True, "age_seconds": int(age)})
+        except:
+            pass
+
+    try:
+        data = _fetch_continental_schedule(competition)
+        _cache[cache_key]      = data
+        _cache[cache_time_key] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return jsonify({**data, "cached": False})
+    except Exception as e:
+        log.error(f"continental schedule error ({competition}): {e}")
+        if cached:
+            return jsonify({**cached, "cached": True, "stale": True})
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Team helpers ──────────────────────────────────────────────────────────────
+
 def _get_team_ha_stats(team_id, season_id):
     import requests as req
     token = os.environ.get("SPORTMONKS_API_TOKEN")
@@ -1489,7 +1700,6 @@ def nightly_run():
             })
 
         # Also record top 20 non-contributors so Hit% is accurate
-        # These are players ranked in top 20 who didn't score or assist
         recorded_pids = set(all_pids)
         for market_name, ranked_list, rank_map in [
             ("assist", assist_ranked, assist_rank_map),
@@ -1498,7 +1708,6 @@ def nightly_run():
             for i, p in enumerate(ranked_list[:20]):
                 pid = p.get("player_id")
                 if not pid or pid in recorded_pids: continue
-                # Find which fixture this player is in
                 tid = str(p.get("team_id", ""))
                 fid = next((
                     m["match_id"] for m in today_fixtures
