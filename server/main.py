@@ -666,6 +666,7 @@ def _get_team_ha_stats(team_id, season_id):
             "gf_pg_home": round(get_avg(52,"home"),2), "gf_pg_away": round(get_avg(52,"away"),2),
             "ga_pg_home": round(get_avg(88,"home"),2), "ga_pg_away": round(get_avg(88,"away"),2),
             "wins_home": get_count(214,"home"), "wins_away": get_count(214,"away"),
+            "draws_home": get_count(191,"home"), "draws_away": get_count(191,"away"),
             "losses_home": get_count(192,"home"), "losses_away": get_count(192,"away"),
             "cs_home": get_count(194,"home"), "cs_away": get_count(194,"away"),
             "weak_def_home": get_avg(88,"home") >= 1.5, "weak_def_away": get_avg(88,"away") >= 1.5,
