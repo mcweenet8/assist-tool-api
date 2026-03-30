@@ -1018,8 +1018,6 @@ def sm_match(fixture_id):
         season_id   = LEAGUE_SEASON_MAP.get(league_id)
         season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
-        home_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id)
-        away_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id)
 
         home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
         away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
@@ -1059,14 +1057,17 @@ def sm_match(fixture_id):
                 elif a_flag or g_flag:                      overall_flag = "MEDIUM"
                 result.append({
                     **p,
-                    "assist_index":          round(a_adj, 3),
-                    "goal_score":            round(g_adj, 3),
-                    "assist_flag":           a_flag,
-                    "goal_flag":             g_flag,
-                    "shots_flag":            s_flag,
-                    "concession_flag":       overall_flag,
+                    "assist_index":    round(a_adj, 3),
+                    "goal_score":      round(g_adj, 3),
+                    "assist_flag":     a_flag,
+                    "goal_flag":       g_flag,
+                    "shots_flag":      s_flag,
+                    "concession_flag": overall_flag,
                 })
             return result
+
+        home_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id)
+        away_players = apply_pe(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id)
 
         lineup_data = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
         try:
