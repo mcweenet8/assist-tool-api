@@ -2,10 +2,10 @@
 Deep Current Football — Positional Concessions System
 server/positional_concessions.py
 
-Tracks goals, assists, and big chances conceded by position.
+Tracks goals, assists, big chances, shots, and SOT conceded by position.
 Includes home/away splits for more accurate matchup multipliers.
 
-v2 — Batched Supabase writes (single upsert per team/position per fixture)
+v3 — Added shots/SOT concession tracking
 """
 
 import os
@@ -49,21 +49,24 @@ BROAD_MAP = {
 }
 
 # ── MINIMUM SAMPLE THRESHOLDS — rolling gate before PE flags fire ─────────────
-# GP minimum before any flag is assigned — DEF needs more games (low base rate)
 MIN_GP = {
-    "GK":  999,  # never flag GK
-    "DEF": 8,    # DEF base rate is low — needs more games for reliable signal
+    "GK":  999,
+    "DEF": 8,
     "MID": 5,
     "FWD": 5,
 }
 
-# Minimum absolute concessions (goals + assists combined) before flagging
 MIN_CONCESSIONS = {
     "GK":  999,
     "DEF": 2,
     "MID": 2,
     "FWD": 2,
 }
+
+# Stat type IDs for shots/SOT from fixture statistics
+STAT_TYPE_SHOTS_TOTAL = 42
+STAT_TYPE_SOT         = 86
+
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -116,6 +119,12 @@ def _flush_broad(team_id, season_id, league_id, accum):
                 "bc_conceded":           row.get("bc_conceded", 0)              + delta.get("bc", 0),
                 "bc_conceded_home":      row.get("bc_conceded_home", 0)         + delta.get("bc_home", 0),
                 "bc_conceded_away":      row.get("bc_conceded_away", 0)         + delta.get("bc_away", 0),
+                "shots_conceded":        row.get("shots_conceded", 0)           + delta.get("shots", 0),
+                "shots_conceded_home":   row.get("shots_conceded_home", 0)      + delta.get("shots_home", 0),
+                "shots_conceded_away":   row.get("shots_conceded_away", 0)      + delta.get("shots_away", 0),
+                "sot_conceded":          row.get("sot_conceded", 0)             + delta.get("sot", 0),
+                "sot_conceded_home":     row.get("sot_conceded_home", 0)        + delta.get("sot_home", 0),
+                "sot_conceded_away":     row.get("sot_conceded_away", 0)        + delta.get("sot_away", 0),
                 "games_played":          row["games_played"]                    + delta.get("games", 0),
                 "last_updated":          datetime.utcnow().isoformat()
             }).eq("id", row["id"]).execute()
@@ -134,6 +143,12 @@ def _flush_broad(team_id, season_id, league_id, accum):
                 "bc_conceded":           delta.get("bc", 0),
                 "bc_conceded_home":      delta.get("bc_home", 0),
                 "bc_conceded_away":      delta.get("bc_away", 0),
+                "shots_conceded":        delta.get("shots", 0),
+                "shots_conceded_home":   delta.get("shots_home", 0),
+                "shots_conceded_away":   delta.get("shots_away", 0),
+                "sot_conceded":          delta.get("sot", 0),
+                "sot_conceded_home":     delta.get("sot_home", 0),
+                "sot_conceded_away":     delta.get("sot_away", 0),
                 "games_played":          delta.get("games", 0),
             }).execute()
 
@@ -159,6 +174,12 @@ def _flush_granular(team_id, season_id, league_id, accum):
                 "bc_conceded":           row.get("bc_conceded", 0)              + delta.get("bc", 0),
                 "bc_conceded_home":      row.get("bc_conceded_home", 0)         + delta.get("bc_home", 0),
                 "bc_conceded_away":      row.get("bc_conceded_away", 0)         + delta.get("bc_away", 0),
+                "shots_conceded":        row.get("shots_conceded", 0)           + delta.get("shots", 0),
+                "shots_conceded_home":   row.get("shots_conceded_home", 0)      + delta.get("shots_home", 0),
+                "shots_conceded_away":   row.get("shots_conceded_away", 0)      + delta.get("shots_away", 0),
+                "sot_conceded":          row.get("sot_conceded", 0)             + delta.get("sot", 0),
+                "sot_conceded_home":     row.get("sot_conceded_home", 0)        + delta.get("sot_home", 0),
+                "sot_conceded_away":     row.get("sot_conceded_away", 0)        + delta.get("sot_away", 0),
                 "games_played":          row["games_played"]                    + delta.get("games", 0),
                 "last_updated":          datetime.utcnow().isoformat()
             }).eq("id", row["id"]).execute()
@@ -179,6 +200,12 @@ def _flush_granular(team_id, season_id, league_id, accum):
                 "bc_conceded":           delta.get("bc", 0),
                 "bc_conceded_home":      delta.get("bc_home", 0),
                 "bc_conceded_away":      delta.get("bc_away", 0),
+                "shots_conceded":        delta.get("shots", 0),
+                "shots_conceded_home":   delta.get("shots_home", 0),
+                "shots_conceded_away":   delta.get("shots_away", 0),
+                "sot_conceded":          delta.get("sot", 0),
+                "sot_conceded_home":     delta.get("sot_home", 0),
+                "sot_conceded_away":     delta.get("sot_away", 0),
                 "games_played":          delta.get("games", 0),
             }).execute()
 
@@ -241,13 +268,25 @@ def process_fixture(fixture_id, season_id, league_id):
     statistics = fixture.get("statistics", [])
     if isinstance(statistics, dict): statistics = statistics.get("data", [])
 
-    player_bc = {}
+    # Build per-player stats from fixture statistics
+    # type_id 580 = big chances created, 42 = shots total, 86 = shots on target
+    player_bc    = {}
+    player_shots = {}
+    player_sot   = {}
+
     for stat in statistics:
-        if stat.get("type_id") == 580:
-            pid = stat.get("player_id")
-            val = stat.get("data", {}).get("value", 0) or 0
-            if pid:
-                player_bc[pid] = player_bc.get(pid, 0) + val
+        pid = stat.get("player_id")
+        if not pid:
+            continue
+        type_id = stat.get("type_id")
+        val = stat.get("data", {}).get("value", 0) or 0
+
+        if type_id == 580:
+            player_bc[pid]    = player_bc.get(pid, 0)    + val
+        elif type_id == STAT_TYPE_SHOTS_TOTAL:
+            player_shots[pid] = player_shots.get(pid, 0) + val
+        elif type_id == STAT_TYPE_SOT:
+            player_sot[pid]   = player_sot.get(pid, 0)   + val
 
     broad_accum    = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     granular_accum = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -259,6 +298,7 @@ def process_fixture(fixture_id, season_id, league_id):
     if home_team_id: games_teams.add(home_team_id)
     if away_team_id: games_teams.add(away_team_id)
 
+    # ── Goal events → track goals and assists conceded by position ────────────
     for event in events:
         if event.get("type_id") != 14:
             continue
@@ -311,6 +351,7 @@ def process_fixture(fixture_id, season_id, league_id):
                 granular_accum[opposing_team][did]["position_code"] = pos_code
                 granular_accum[opposing_team][did]["broad_pos"]     = broad
 
+    # ── Big chances created → conceded by opposing team ───────────────────────
     for pid, bc_count in player_bc.items():
         if pid not in player_positions or bc_count == 0:
             continue
@@ -339,6 +380,65 @@ def process_fixture(fixture_id, season_id, league_id):
             granular_accum[opposing_team][did]["position_code"] = pos_code
             granular_accum[opposing_team][did]["broad_pos"]     = broad
 
+    # ── Shots total → conceded by opposing team ───────────────────────────────
+    for pid, shot_count in player_shots.items():
+        if pid not in player_positions or shot_count == 0:
+            continue
+        pos_info      = player_positions[pid]
+        scoring_team  = pos_info.get("team_id")
+        opposing_team = get_opposing_team(scoring_team)
+        if not opposing_team:
+            continue
+        opp_is_home = is_home(opposing_team)
+        h = 1 if opp_is_home else 0
+        a = 0 if opp_is_home else 1
+
+        pos_code, broad = _get_position_info(
+            pos_info["position_id"], pos_info["detailed_position_id"]
+        )
+        if broad:
+            broad_accum[opposing_team][broad]["shots"]       += shot_count
+            broad_accum[opposing_team][broad]["shots_home"]  += h * shot_count
+            broad_accum[opposing_team][broad]["shots_away"]  += a * shot_count
+
+        if pos_code and pos_code != broad and pos_info["detailed_position_id"]:
+            did = pos_info["detailed_position_id"]
+            granular_accum[opposing_team][did]["shots"]       += shot_count
+            granular_accum[opposing_team][did]["shots_home"]  += h * shot_count
+            granular_accum[opposing_team][did]["shots_away"]  += a * shot_count
+            granular_accum[opposing_team][did]["position_code"] = pos_code
+            granular_accum[opposing_team][did]["broad_pos"]     = broad
+
+    # ── SOT → conceded by opposing team ──────────────────────────────────────
+    for pid, sot_count in player_sot.items():
+        if pid not in player_positions or sot_count == 0:
+            continue
+        pos_info      = player_positions[pid]
+        scoring_team  = pos_info.get("team_id")
+        opposing_team = get_opposing_team(scoring_team)
+        if not opposing_team:
+            continue
+        opp_is_home = is_home(opposing_team)
+        h = 1 if opp_is_home else 0
+        a = 0 if opp_is_home else 1
+
+        pos_code, broad = _get_position_info(
+            pos_info["position_id"], pos_info["detailed_position_id"]
+        )
+        if broad:
+            broad_accum[opposing_team][broad]["sot"]       += sot_count
+            broad_accum[opposing_team][broad]["sot_home"]  += h * sot_count
+            broad_accum[opposing_team][broad]["sot_away"]  += a * sot_count
+
+        if pos_code and pos_code != broad and pos_info["detailed_position_id"]:
+            did = pos_info["detailed_position_id"]
+            granular_accum[opposing_team][did]["sot"]       += sot_count
+            granular_accum[opposing_team][did]["sot_home"]  += h * sot_count
+            granular_accum[opposing_team][did]["sot_away"]  += a * sot_count
+            granular_accum[opposing_team][did]["position_code"] = pos_code
+            granular_accum[opposing_team][did]["broad_pos"]     = broad
+
+    # ── games_played increment ────────────────────────────────────────────────
     for team_id in games_teams:
         for broad in ["GK", "DEF", "MID", "FWD"]:
             broad_accum[team_id][broad]["games"] += 1
@@ -402,6 +502,12 @@ def _update_league_averages(season_id, league_id):
         broad_groups[bp]["bc"]           += row.get("bc_conceded", 0)
         broad_groups[bp]["bc_home"]      += row.get("bc_conceded_home", 0)
         broad_groups[bp]["bc_away"]      += row.get("bc_conceded_away", 0)
+        broad_groups[bp]["shots"]        += row.get("shots_conceded", 0)
+        broad_groups[bp]["shots_home"]   += row.get("shots_conceded_home", 0)
+        broad_groups[bp]["shots_away"]   += row.get("shots_conceded_away", 0)
+        broad_groups[bp]["sot"]          += row.get("sot_conceded", 0)
+        broad_groups[bp]["sot_home"]     += row.get("sot_conceded_home", 0)
+        broad_groups[bp]["sot_away"]     += row.get("sot_conceded_away", 0)
         broad_groups[bp]["games"]        += row["games_played"]
         broad_groups[bp]["teams"]        += 1
 
@@ -422,6 +528,12 @@ def _update_league_averages(season_id, league_id):
             "avg_bc_per_game":      t["bc"]           / gp,
             "avg_bc_home":          t["bc_home"]      / gp,
             "avg_bc_away":          t["bc_away"]      / gp,
+            "avg_shots_per_game":   t["shots"]        / gp,
+            "avg_shots_home":       t["shots_home"]   / gp,
+            "avg_shots_away":       t["shots_away"]   / gp,
+            "avg_sot_per_game":     t["sot"]          / gp,
+            "avg_sot_home":         t["sot_home"]     / gp,
+            "avg_sot_away":         t["sot_away"]     / gp,
             "sample_size":          int(t["teams"]),
             "last_updated":         datetime.utcnow().isoformat()
         }, on_conflict="league_id,season_id,granularity,broad_position,position_code").execute()
@@ -443,6 +555,12 @@ def _update_league_averages(season_id, league_id):
         granular_groups[pc]["bc"]           += row.get("bc_conceded", 0)
         granular_groups[pc]["bc_home"]      += row.get("bc_conceded_home", 0)
         granular_groups[pc]["bc_away"]      += row.get("bc_conceded_away", 0)
+        granular_groups[pc]["shots"]        += row.get("shots_conceded", 0)
+        granular_groups[pc]["shots_home"]   += row.get("shots_conceded_home", 0)
+        granular_groups[pc]["shots_away"]   += row.get("shots_conceded_away", 0)
+        granular_groups[pc]["sot"]          += row.get("sot_conceded", 0)
+        granular_groups[pc]["sot_home"]     += row.get("sot_conceded_home", 0)
+        granular_groups[pc]["sot_away"]     += row.get("sot_conceded_away", 0)
         granular_groups[pc]["games"]        += row["games_played"]
         granular_groups[pc]["teams"]        += 1
         gmeta[pc] = {"broad": row["broad_position"], "position_id": row["position_id"]}
@@ -464,6 +582,12 @@ def _update_league_averages(season_id, league_id):
             "avg_bc_per_game":      t["bc"]           / gp,
             "avg_bc_home":          t["bc_home"]      / gp,
             "avg_bc_away":          t["bc_away"]      / gp,
+            "avg_shots_per_game":   t["shots"]        / gp,
+            "avg_shots_home":       t["shots_home"]   / gp,
+            "avg_shots_away":       t["shots_away"]   / gp,
+            "avg_sot_per_game":     t["sot"]          / gp,
+            "avg_sot_home":         t["sot_home"]     / gp,
+            "avg_sot_away":         t["sot_away"]     / gp,
             "sample_size":          int(t["teams"]),
             "last_updated":         datetime.utcnow().isoformat()
         }, on_conflict="league_id,season_id,granularity,broad_position,position_code").execute()
@@ -517,28 +641,36 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_broad.get(bp, {})
             gp  = row["games_played"] or 1
 
-            # ── Rolling sample gate ──────────────────────────────────────────
             min_gp   = MIN_GP.get(bp, 5)
             min_conc = MIN_CONCESSIONS.get(bp, 2)
             total_concessions = row["goals_conceded"] + row["assists_conceded"]
 
-            gpg  = row["goals_conceded"]     / gp
-            apg  = row["assists_conceded"]   / gp
-            bcpg = row.get("bc_conceded", 0) / gp
-            avg_g = avg.get("avg_goals_per_game",   0.001) or 0.001
-            avg_a = avg.get("avg_assists_per_game", 0.001) or 0.001
-            avg_b = avg.get("avg_bc_per_game",      0.001) or 0.001
+            gpg   = row["goals_conceded"]          / gp
+            apg   = row["assists_conceded"]        / gp
+            bcpg  = row.get("bc_conceded", 0)      / gp
+            spg   = row.get("shots_conceded", 0)   / gp
+            sotpg = row.get("sot_conceded", 0)     / gp
 
-            goal_mult   = gpg  / avg_g
-            assist_mult = apg  / avg_a
-            bc_mult     = bcpg / avg_b
+            avg_g    = avg.get("avg_goals_per_game",   0.001) or 0.001
+            avg_a    = avg.get("avg_assists_per_game", 0.001) or 0.001
+            avg_b    = avg.get("avg_bc_per_game",      0.001) or 0.001
+            avg_s    = avg.get("avg_shots_per_game",   0.001) or 0.001
+            avg_sot  = avg.get("avg_sot_per_game",     0.001) or 0.001
+
+            goal_mult   = gpg   / avg_g
+            assist_mult = apg   / avg_a
+            bc_mult     = bcpg  / avg_b
+            shots_mult  = spg   / avg_s
+            sot_mult    = sotpg / avg_sot
 
             ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
             ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
-            abs_goal_flag   = gpg >= ABS_GOAL_THRESH.get(bp, 99)
-            abs_assist_flag = apg >= ABS_ASSIST_THRESH.get(bp, 99)
+            ABS_SOT_THRESH    = {"GK": 99, "DEF": 0.50, "MID": 1.20, "FWD": 1.50}
 
-            # Only assign flag if sample meets minimum thresholds
+            abs_goal_flag   = gpg   >= ABS_GOAL_THRESH.get(bp, 99)
+            abs_assist_flag = apg   >= ABS_ASSIST_THRESH.get(bp, 99)
+            abs_sot_flag    = sotpg >= ABS_SOT_THRESH.get(bp, 99)
+
             flag = None
             if gp >= min_gp and total_concessions >= min_conc:
                 if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
@@ -546,14 +678,27 @@ def get_multipliers(fixture_id, season_id, league_id):
                 elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
                     flag = "MEDIUM"
 
+            # Separate shots/SOT flag — independent of goal/assist flag
+            shots_flag = None
+            if gp >= min_gp:
+                if sot_mult >= THRESHOLD_HIGH or abs_sot_flag:
+                    shots_flag = "HIGH"
+                elif sot_mult >= THRESHOLD_MEDIUM:
+                    shots_flag = "MEDIUM"
+
             result[team_id]["broad"][bp] = {
                 "goal_multiplier":   round(goal_mult, 2),
                 "assist_multiplier": round(assist_mult, 2),
                 "bc_multiplier":     round(bc_mult, 2),
+                "shots_multiplier":  round(shots_mult, 2),
+                "sot_multiplier":    round(sot_mult, 2),
                 "goals_conceded":    row["goals_conceded"],
                 "assists_conceded":  row["assists_conceded"],
+                "shots_conceded":    row.get("shots_conceded", 0),
+                "sot_conceded":      row.get("sot_conceded", 0),
                 "games_played":      gp,
                 "flag":              flag,
+                "shots_flag":        shots_flag,
                 "location":          "home" if team_is_home else "away",
             }
 
@@ -571,23 +716,32 @@ def get_multipliers(fixture_id, season_id, league_id):
             min_conc = MIN_CONCESSIONS.get(broad_for_pc, 2)
             total_concessions = row["goals_conceded"] + row["assists_conceded"]
 
-            gpg  = row["goals_conceded"]              / gp
-            apg  = row["assists_conceded"]            / gp
-            bcpg = row.get("bc_conceded", 0)          / gp
-            avg_g = avg.get("avg_goals_per_game",   0.001) or 0.001
-            avg_a = avg.get("avg_assists_per_game", 0.001) or 0.001
-            avg_b = avg.get("avg_bc_per_game",      0.001) or 0.001
+            gpg   = row["goals_conceded"]          / gp
+            apg   = row["assists_conceded"]        / gp
+            bcpg  = row.get("bc_conceded", 0)      / gp
+            spg   = row.get("shots_conceded", 0)   / gp
+            sotpg = row.get("sot_conceded", 0)     / gp
 
-            goal_mult   = gpg  / max(avg_g, 0.001)
-            assist_mult = apg  / max(avg_a, 0.001)
-            bc_mult     = bcpg / max(avg_b, 0.001)
+            avg_g   = avg.get("avg_goals_per_game",   0.001) or 0.001
+            avg_a   = avg.get("avg_assists_per_game", 0.001) or 0.001
+            avg_b   = avg.get("avg_bc_per_game",      0.001) or 0.001
+            avg_s   = avg.get("avg_shots_per_game",   0.001) or 0.001
+            avg_sot = avg.get("avg_sot_per_game",     0.001) or 0.001
+
+            goal_mult   = gpg   / max(avg_g,   0.001)
+            assist_mult = apg   / max(avg_a,   0.001)
+            bc_mult     = bcpg  / max(avg_b,   0.001)
+            shots_mult  = spg   / max(avg_s,   0.001)
+            sot_mult    = sotpg / max(avg_sot, 0.001)
 
             ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
             ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
-            abs_goal_flag   = gpg >= ABS_GOAL_THRESH.get(broad_for_pc, 99)
-            abs_assist_flag = apg >= ABS_ASSIST_THRESH.get(broad_for_pc, 99)
+            ABS_SOT_THRESH    = {"GK": 99, "DEF": 0.50, "MID": 1.20, "FWD": 1.50}
 
-            # Only assign flag if sample meets minimum thresholds
+            abs_goal_flag   = gpg   >= ABS_GOAL_THRESH.get(broad_for_pc, 99)
+            abs_assist_flag = apg   >= ABS_ASSIST_THRESH.get(broad_for_pc, 99)
+            abs_sot_flag    = sotpg >= ABS_SOT_THRESH.get(broad_for_pc, 99)
+
             flag = None
             if gp >= min_gp and total_concessions >= min_conc:
                 if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
@@ -595,14 +749,26 @@ def get_multipliers(fixture_id, season_id, league_id):
                 elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
                     flag = "MEDIUM"
 
+            shots_flag = None
+            if gp >= min_gp:
+                if sot_mult >= THRESHOLD_HIGH or abs_sot_flag:
+                    shots_flag = "HIGH"
+                elif sot_mult >= THRESHOLD_MEDIUM:
+                    shots_flag = "MEDIUM"
+
             result[team_id]["granular"][pc] = {
                 "goal_multiplier":   round(goal_mult, 2),
                 "assist_multiplier": round(assist_mult, 2),
                 "bc_multiplier":     round(bc_mult, 2),
+                "shots_multiplier":  round(shots_mult, 2),
+                "sot_multiplier":    round(sot_mult, 2),
                 "goals_conceded":    row["goals_conceded"],
                 "assists_conceded":  row["assists_conceded"],
+                "shots_conceded":    row.get("shots_conceded", 0),
+                "sot_conceded":      row.get("sot_conceded", 0),
                 "games_played":      gp,
                 "flag":              flag,
+                "shots_flag":        shots_flag,
                 "location":          "home" if team_is_home else "away",
             }
 
@@ -613,20 +779,24 @@ def get_multipliers(fixture_id, season_id, league_id):
 
 def apply_concession_multiplier(player_score, player_position_code,
                                  opponent_multipliers, score_type="assist"):
-    broad   = BROAD_MAP.get(player_position_code, "MID")
-    mult_key = "goal_multiplier" if score_type == "goal" else "assist_multiplier"
+    broad    = BROAD_MAP.get(player_position_code, "MID")
+    mult_key = "goal_multiplier" if score_type == "goal" \
+               else "sot_multiplier" if score_type == "sot" \
+               else "shots_multiplier" if score_type == "shots" \
+               else "assist_multiplier"
 
     multiplier = 1.0
     flag       = None
+    flag_key   = "shots_flag" if score_type in ("sot", "shots") else "flag"
 
     granular = opponent_multipliers.get("granular", {})
     if player_position_code in granular:
         multiplier = granular[player_position_code].get(mult_key, 1.0)
-        flag       = granular[player_position_code].get("flag")
+        flag       = granular[player_position_code].get(flag_key)
     else:
         broad_data = opponent_multipliers.get("broad", {})
         if broad in broad_data:
             multiplier = broad_data[broad].get(mult_key, 1.0)
-            flag       = broad_data[broad].get("flag")
+            flag       = broad_data[broad].get(flag_key)
 
     return round(player_score * multiplier, 3), multiplier, flag
