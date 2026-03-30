@@ -1060,12 +1060,14 @@ def sm_match(fixture_id):
         home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
         away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
 
-        # ── Positional concession multipliers ────────────────────────────────
+        # ── Positional concession multipliers — cached per fixture ───────────
         concession_mults = {}
         try:
             if season_id and league_id:
-                concession_mults = get_multipliers(fixture_id, season_id, league_id)
-                log.info(f"PE mults keys: {list(concession_mults.keys())}")
+                cache_key = f"mults_{fixture_id}"
+                if cache_key not in _cache:
+                    _cache[cache_key] = get_multipliers(fixture_id, season_id, league_id)
+                concession_mults = _cache[cache_key]
         except Exception as e:
             log.warning(f"get_multipliers error {fixture_id}: {e}")
 
