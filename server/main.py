@@ -889,20 +889,29 @@ def sm_team_form(team_id):
         start = (today - _td(days=60)).strftime("%Y-%m-%d")
         end   = today.strftime("%Y-%m-%d")
 
-        r = _req.get(
-            f"https://api.sportmonks.com/v3/football/fixtures/between/{start}/{end}",
-            params={
-                "api_token": token,
-                "filters":   f"fixtureLeagues:{league_id}",
-                "include":   "participants;scores;state",
-                "per_page":  100,
-            },
-            timeout=15
-        )
-        if r.status_code != 200:
-            return jsonify({"form": [], "error": f"SM returned {r.status_code}"})
-
-        raw = r.json().get("data", [])
+        # Fetch all pages
+        raw  = []
+        page = 1
+        while True:
+            r = _req.get(
+                f"https://api.sportmonks.com/v3/football/fixtures/between/{start}/{end}",
+                params={
+                    "api_token": token,
+                    "filters":   f"fixtureLeagues:{league_id}",
+                    "include":   "participants;scores;state",
+                    "per_page":  25,
+                    "page":      page,
+                },
+                timeout=15
+            )
+            if r.status_code != 200:
+                return jsonify({"form": [], "error": f"SM returned {r.status_code}"})
+            data = r.json()
+            raw.extend(data.get("data", []))
+            if not data.get("pagination", {}).get("has_more"):
+                break
+            page += 1
+            if page > 10: break  # safety limit
 
         results = []
         for fix in raw:
