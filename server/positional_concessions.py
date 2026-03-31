@@ -5,7 +5,7 @@ server/positional_concessions.py
 Tracks goals, assists, big chances, shots, and SOT conceded by position.
 Includes home/away splits for more accurate matchup multipliers.
 
-v3 — Added shots/SOT concession tracking
+v4 — Granular position tracking with confirmed SM position IDs
 """
 
 import os
@@ -27,43 +27,99 @@ BROAD_POSITION_MAP = {
     24: "GK", 25: "DEF", 26: "MID", 27: "FWD",
 }
 
+# Confirmed against SM documentation and player validation
+# (detailed_position_id) → (position_code, broad_position)
 GRANULAR_POSITION_MAP = {
     24:  ("GK",  "GK"),
-    144: ("GK",  "GK"),
-    148: ("DEF", "DEF"), 154: ("DEF", "DEF"), 155: ("DEF", "DEF"),
-    149: ("MID", "MID"), 150: ("MID", "MID"), 153: ("MID", "MID"),
-    157: ("MID", "MID"), 158: ("MID", "MID"),
-    151: ("FWD", "FWD"), 152: ("FWD", "FWD"), 156: ("FWD", "FWD"),
-    159: ("FWD", "FWD"), 160: ("FWD", "FWD"), 161: ("FWD", "FWD"),
-    162: ("FWD", "FWD"), 163: ("FWD", "FWD"),
+    148: ("CB",  "DEF"),
+    154: ("RB",  "DEF"),
+    155: ("LB",  "DEF"),
+    149: ("CDM", "MID"),
+    153: ("CM",  "MID"),
+    150: ("CAM", "MID"),
+    157: ("LM",  "MID"),
+    158: ("RM",  "MID"),
+    151: ("ST",  "FWD"),
+    163: ("SS",  "FWD"),
+    152: ("LW",  "FWD"),
+    156: ("RW",  "FWD"),
 }
 
-THRESHOLD_HIGH   = 2.0
-THRESHOLD_MEDIUM = 1.5
-
+# Broad fallback map for position_codes → broad group
+# Used when looking up granular multipliers
 BROAD_MAP = {
     "GK":  "GK",
+    "CB":  "DEF",
+    "RB":  "DEF",
+    "LB":  "DEF",
+    "CDM": "MID",
+    "CM":  "MID",
+    "CAM": "MID",
+    "LM":  "MID",
+    "RM":  "MID",
+    "ST":  "FWD",
+    "SS":  "FWD",
+    "LW":  "FWD",
+    "RW":  "FWD",
+    # Legacy broad codes
     "DEF": "DEF",
     "MID": "MID",
     "FWD": "FWD",
 }
 
-# ── MINIMUM SAMPLE THRESHOLDS — rolling gate before PE flags fire ─────────────
-MIN_GP = {
+THRESHOLD_HIGH   = 2.0
+THRESHOLD_MEDIUM = 1.5
+
+# ── MINIMUM SAMPLE THRESHOLDS ─────────────────────────────────────────────────
+# Broad positions
+MIN_GP_BROAD = {
     "GK":  999,
     "DEF": 8,
     "MID": 5,
     "FWD": 5,
 }
 
-MIN_CONCESSIONS = {
+MIN_CONCESSIONS_BROAD = {
     "GK":  999,
     "DEF": 2,
     "MID": 2,
     "FWD": 2,
 }
 
-# Stat type IDs for shots/SOT from fixture statistics
+# Granular positions — higher threshold needed for thin position groups
+MIN_GP_GRANULAR = {
+    "GK":  999,
+    "CB":  8,
+    "RB":  6,
+    "LB":  6,
+    "CDM": 6,
+    "CM":  5,
+    "CAM": 5,
+    "LM":  5,
+    "RM":  5,
+    "ST":  5,
+    "SS":  5,
+    "LW":  5,
+    "RW":  5,
+}
+
+MIN_CONCESSIONS_GRANULAR = {
+    "GK":  999,
+    "CB":  2,
+    "RB":  1,
+    "LB":  1,
+    "CDM": 1,
+    "CM":  2,
+    "CAM": 2,
+    "LM":  1,
+    "RM":  1,
+    "ST":  2,
+    "SS":  1,
+    "LW":  2,
+    "RW":  2,
+}
+
+# Stat type IDs for shots/SOT from lineup details
 STAT_TYPE_SHOTS_TOTAL = 42
 STAT_TYPE_SOT         = 86
 
@@ -639,8 +695,8 @@ def get_multipliers(fixture_id, season_id, league_id):
             avg = league_avgs_broad.get(bp, {})
             gp  = row["games_played"] or 1
 
-            min_gp   = MIN_GP.get(bp, 5)
-            min_conc = MIN_CONCESSIONS.get(bp, 2)
+            min_gp   = MIN_GP_BROAD.get(bp, 5)
+            min_conc = MIN_CONCESSIONS_BROAD.get(bp, 2)
             total_concessions = row["goals_conceded"] + row["assists_conceded"]
 
             gpg   = row["goals_conceded"]          / gp
@@ -710,8 +766,8 @@ def get_multipliers(fixture_id, season_id, league_id):
             gp  = row["games_played"] or 1
 
             broad_for_pc = BROAD_MAP.get(pc, "MID")
-            min_gp   = MIN_GP.get(broad_for_pc, 5)
-            min_conc = MIN_CONCESSIONS.get(broad_for_pc, 2)
+            min_gp   = MIN_GP_GRANULAR.get(pc, MIN_GP_BROAD.get(broad_for_pc, 5))
+            min_conc = MIN_CONCESSIONS_GRANULAR.get(pc, MIN_CONCESSIONS_BROAD.get(broad_for_pc, 2))
             total_concessions = row["goals_conceded"] + row["assists_conceded"]
 
             gpg   = row["goals_conceded"]          / gp
@@ -732,27 +788,17 @@ def get_multipliers(fixture_id, season_id, league_id):
             shots_mult  = spg   / max(avg_s,   0.001)
             sot_mult    = sotpg / max(avg_sot, 0.001)
 
-            ABS_GOAL_THRESH   = {"GK": 99, "DEF": 0.27, "MID": 0.75, "FWD": 0.85}
-            ABS_ASSIST_THRESH = {"GK": 99, "DEF": 0.30, "MID": 0.70, "FWD": 0.40}
-            ABS_SOT_THRESH    = {"GK": 99, "DEF": 0.50, "MID": 1.20, "FWD": 1.50}
-
-            abs_goal_flag   = gpg   >= ABS_GOAL_THRESH.get(broad_for_pc, 99)
-            abs_assist_flag = apg   >= ABS_ASSIST_THRESH.get(broad_for_pc, 99)
-            abs_sot_flag    = sotpg >= ABS_SOT_THRESH.get(broad_for_pc, 99)
-
             flag = None
             if gp >= min_gp and total_concessions >= min_conc:
-                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
+                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH:
                     flag = "HIGH"
                 elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
                     flag = "MEDIUM"
 
             shots_flag = None
             if gp >= min_gp:
-                if sot_mult >= THRESHOLD_HIGH or abs_sot_flag:
-                    shots_flag = "HIGH"
-                elif sot_mult >= THRESHOLD_MEDIUM:
-                    shots_flag = "MEDIUM"
+                if sot_mult >= THRESHOLD_HIGH:   shots_flag = "HIGH"
+                elif sot_mult >= THRESHOLD_MEDIUM: shots_flag = "MEDIUM"
 
             result[team_id]["granular"][pc] = {
                 "goal_multiplier":   round(goal_mult, 2),
