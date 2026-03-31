@@ -997,7 +997,7 @@ def sm_lineups_today():
     return jsonify({"fixture_availability": availability, "cached": False, "active_count": len(active_fids)})
 
 
-from .positional_concessions import GRANULAR_POSITION_MAP as _GPM, apply_concession_multiplier as _acm
+
 
 def _apply_pe_flags(players, opponent_team_id, concession_mults):
     try:
@@ -1007,22 +1007,37 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
     opp_mults = concession_mults.get(opp_id, {})
     if not opp_mults:
         return players
+
+    from .positional_concessions import GRANULAR_POSITION_MAP as _GPM, BROAD_MAP as _BM, apply_concession_multiplier as _acm
+
     result = []
     for p in players:
         detailed_pos = p.get("detailed_position_id")
         position_id  = p.get("position_id")
+
+        # Get position code — granular first, fall back to broad
         pos_code = _GPM.get(detailed_pos, (None, None))[0]
         if not pos_code and position_id:
-            pos_code = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(position_id)
+            pos_code = {24:"GK", 25:"DEF", 26:"MID", 27:"FWD"}.get(position_id)
         if not pos_code:
             result.append(p)
             continue
+
+        # Look up multipliers — try granular first, fall back to broad
+        granular = opp_mults.get("granular", {})
+        broad    = opp_mults.get("broad", {})
+        broad_group = _BM.get(pos_code, "MID")
+
+        has_granular = pos_code in granular
+
         a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
         g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal")
         _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot")
+
         overall_flag = None
         if a_flag == "HIGH" or g_flag == "HIGH":    overall_flag = "HIGH"
         elif a_flag or g_flag:                      overall_flag = "MEDIUM"
+
         result.append({
             **p,
             "assist_index":    round(a_adj, 3),
@@ -1031,6 +1046,7 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
             "goal_flag":       g_flag,
             "shots_flag":      s_flag,
             "concession_flag": overall_flag,
+            "pe_granular":     has_granular,  # flag whether granular data was used
         })
     return result
 
