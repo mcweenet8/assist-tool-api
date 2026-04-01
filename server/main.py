@@ -1097,8 +1097,9 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
 def sm_match(fixture_id):
     # Cache match response 2 minutes — short TTL to pick up lineup confirmations
     match_cache_key = f"match_response_{fixture_id}"
-    if _cache_valid(match_cache_key, 120) and _cache.get(match_cache_key):
-        return jsonify(_cache[match_cache_key])
+    cached_match = _cache.get(match_cache_key)
+    if _cache_valid(match_cache_key, 120) and cached_match and cached_match.get("home"):
+        return jsonify(cached_match)
     try:
         fixtures = _cache.get("fixtures", {})
         home_id = away_id = home_name = away_name = league_id = None
@@ -1188,7 +1189,9 @@ def sm_match(fixture_id):
             "total_home": len(home_players), "total_away": len(away_players),
             "home_ha": home_ha, "away_ha": away_ha, "lineup": lineup_data,
         }
-        _cache_set(match_cache_key, match_response)
+        # Only cache if we have valid data — never cache empty/error responses
+        if home_name and away_name:
+            _cache_set(match_cache_key, match_response)
         return jsonify(match_response)
 
     except Exception as e:
