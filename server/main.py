@@ -24,6 +24,18 @@ from .pipeline_comparison import build_comparison_for_date, record_outcomes, get
 from .sm_fixtures import get_sm_fixtures
 
 
+# ── Cache TTL helper ─────────────────────────────────────────────────────────
+
+def _cache_valid(key, ttl_seconds):
+    ts = _cache.get(f"{key}_ts")
+    if not ts: return False
+    return (datetime.now() - ts).total_seconds() < ttl_seconds
+
+def _cache_set(key, value):
+    _cache[key] = value
+    _cache[f"{key}_ts"] = datetime.now()
+
+
 # ── Sidelined helpers ────────────────────────────────────────────────────────
 
 def get_sidelined_player_ids(team_ids=None):
@@ -286,6 +298,9 @@ def refresh():
 
 @app.route('/api/sm/today-context', methods=['GET'])
 def sm_today_context():
+    # Serve from cache if fresh (5 min TTL)
+    if _cache_valid("today_context", 300) and _cache.get("today_context"):
+        return jsonify(_cache["today_context"])
     try:
         from .positional_concessions import apply_concession_multiplier, GRANULAR_POSITION_MAP, BROAD_MAP
         from supabase import create_client
@@ -492,12 +507,14 @@ def sm_today_context():
             if fixture.get("home_id"): team_to_fixture[str(fixture["home_id"])] = fid
             if fixture.get("away_id"): team_to_fixture[str(fixture["away_id"])] = fid
 
-        return jsonify({
+        response = {
             "context":              context_map,
             "count":                len(context_map),
             "fixture_availability": fixture_availability,
             "team_to_fixture":      team_to_fixture,
-        })
+        }
+        _cache_set("today_context", response)
+        return jsonify(response)
 
     except Exception as e:
         log.error(f"today-context error: {e}")
@@ -528,8 +545,9 @@ def sm_data():
 
 @app.route('/api/sm/season', methods=['GET'])
 def sm_season():
-    if not _cache.get("season_scores"):
-        _cache["season_scores"] = get_season_scores()
+    # Cache 24 hours — season scores change only on nightly refresh
+    if not _cache.get("season_scores") or not _cache_valid("season_scores", 86400):
+        _cache_set("season_scores", get_season_scores())
         _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     return jsonify(_cache["season_scores"])
 
@@ -1077,6 +1095,10 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
 
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
+    # Cache match response 2 minutes — short TTL to pick up lineup confirmations
+    match_cache_key = f"match_response_{fixture_id}"
+    if _cache_valid(match_cache_key, 120) and _cache.get(match_cache_key):
+        return jsonify(_cache[match_cache_key])
     try:
         fixtures = _cache.get("fixtures", {})
         home_id = away_id = home_name = away_name = league_id = None
@@ -1158,14 +1180,16 @@ def sm_match(fixture_id):
                 result.append(p)
             return result
 
-        return jsonify({
+        match_response = {
             "fixture_id": fixture_id, "home": home_name, "away": away_name,
             "home_id": home_id, "away_id": away_id,
             "home_players": add_sidelined(home_players[:15]),
             "away_players": add_sidelined(away_players[:15]),
             "total_home": len(home_players), "total_away": len(away_players),
             "home_ha": home_ha, "away_ha": away_ha, "lineup": lineup_data,
-        })
+        }
+        _cache_set(match_cache_key, match_response)
+        return jsonify(match_response)
 
     except Exception as e:
         log.error(f"sm_match {fixture_id}: {e}")
