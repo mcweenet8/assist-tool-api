@@ -725,12 +725,17 @@ def get_multipliers(fixture_id, season_id, league_id):
             abs_assist_flag = apg   >= ABS_ASSIST_THRESH.get(bp, 99)
             abs_sot_flag    = sotpg >= ABS_SOT_THRESH.get(bp, 99)
 
-            flag = None
+            goal_flag   = None
+            assist_flag = None
             if gp >= min_gp and total_concessions >= min_conc:
-                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH or abs_goal_flag or abs_assist_flag:
-                    flag = "HIGH"
-                elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
-                    flag = "MEDIUM"
+                if goal_mult >= THRESHOLD_HIGH or abs_goal_flag:
+                    goal_flag = "HIGH"
+                elif goal_mult >= THRESHOLD_MEDIUM:
+                    goal_flag = "MEDIUM"
+                if assist_mult >= THRESHOLD_HIGH or abs_assist_flag:
+                    assist_flag = "HIGH"
+                elif assist_mult >= THRESHOLD_MEDIUM:
+                    assist_flag = "MEDIUM"
 
             # Separate shots/SOT flag — independent of goal/assist flag
             shots_flag = None
@@ -751,7 +756,8 @@ def get_multipliers(fixture_id, season_id, league_id):
                 "shots_conceded":    row.get("shots_conceded", 0),
                 "sot_conceded":      row.get("sot_conceded", 0),
                 "games_played":      gp,
-                "flag":              flag,
+                "goal_flag":         goal_flag,
+                "assist_flag":       assist_flag,
                 "shots_flag":        shots_flag,
                 "location":          "home" if team_is_home else "away",
             }
@@ -788,16 +794,21 @@ def get_multipliers(fixture_id, season_id, league_id):
             shots_mult  = spg   / max(avg_s,   0.001)
             sot_mult    = sotpg / max(avg_sot, 0.001)
 
-            flag = None
+            goal_flag   = None
+            assist_flag = None
             if gp >= min_gp and total_concessions >= min_conc:
-                if goal_mult >= THRESHOLD_HIGH or assist_mult >= THRESHOLD_HIGH:
-                    flag = "HIGH"
-                elif goal_mult >= THRESHOLD_MEDIUM or assist_mult >= THRESHOLD_MEDIUM:
-                    flag = "MEDIUM"
+                if goal_mult >= THRESHOLD_HIGH:
+                    goal_flag = "HIGH"
+                elif goal_mult >= THRESHOLD_MEDIUM:
+                    goal_flag = "MEDIUM"
+                if assist_mult >= THRESHOLD_HIGH:
+                    assist_flag = "HIGH"
+                elif assist_mult >= THRESHOLD_MEDIUM:
+                    assist_flag = "MEDIUM"
 
             shots_flag = None
             if gp >= min_gp:
-                if sot_mult >= THRESHOLD_HIGH:   shots_flag = "HIGH"
+                if sot_mult >= THRESHOLD_HIGH:     shots_flag = "HIGH"
                 elif sot_mult >= THRESHOLD_MEDIUM: shots_flag = "MEDIUM"
 
             result[team_id]["granular"][pc] = {
@@ -811,7 +822,8 @@ def get_multipliers(fixture_id, season_id, league_id):
                 "shots_conceded":    row.get("shots_conceded", 0),
                 "sot_conceded":      row.get("sot_conceded", 0),
                 "games_played":      gp,
-                "flag":              flag,
+                "goal_flag":         goal_flag,
+                "assist_flag":       assist_flag,
                 "shots_flag":        shots_flag,
                 "location":          "home" if team_is_home else "away",
             }
@@ -822,22 +834,35 @@ def get_multipliers(fixture_id, season_id, league_id):
 # ── APPLY MULTIPLIERS ─────────────────────────────────────────────────────────
 
 def apply_concession_multiplier(player_score, player_position_code,
-                                 opponent_multipliers, score_type="assist"):
+                                 opponent_multipliers, score_type="assist",
+                                 has_detailed_position=True):
     broad    = BROAD_MAP.get(player_position_code, "MID")
     mult_key = "goal_multiplier" if score_type == "goal" \
                else "sot_multiplier" if score_type == "sot" \
                else "shots_multiplier" if score_type == "shots" \
                else "assist_multiplier"
 
+    # Market-specific flag key
+    if score_type in ("sot", "shots"):
+        flag_key = "shots_flag"
+    elif score_type == "goal":
+        flag_key = "goal_flag"
+    else:
+        flag_key = "assist_flag"
+
     multiplier = 1.0
     flag       = None
-    flag_key   = "shots_flag" if score_type in ("sot", "shots") else "flag"
 
     granular = opponent_multipliers.get("granular", {})
-    if player_position_code in granular:
-        multiplier = granular[player_position_code].get(mult_key, 1.0)
-        flag       = granular[player_position_code].get(flag_key)
+
+    if has_detailed_position:
+        # Granular players — use granular data only, no broad fallback
+        if player_position_code in granular:
+            multiplier = granular[player_position_code].get(mult_key, 1.0)
+            flag       = granular[player_position_code].get(flag_key)
+        # If no granular data for this position — no flag, no multiplier adjustment
     else:
+        # Null position players — use broad only
         broad_data = opponent_multipliers.get("broad", {})
         if broad in broad_data:
             multiplier = broad_data[broad].get(mult_key, 1.0)
