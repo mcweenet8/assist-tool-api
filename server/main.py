@@ -1675,6 +1675,13 @@ def nightly_run():
             today_team_ids.add(str(m.get("home_id", "")))
             today_team_ids.add(str(m.get("away_id", "")))
 
+        # Build sub player_ids from lineup availability cache
+        sub_player_ids = set()
+        lineup_avail = _cache.get("lineup_availability", {})
+        for fid, avail in lineup_avail.items():
+            for pid in (avail.get("subs") or []):
+                sub_player_ids.add(pid)
+
         today_players   = [p for p in all_players if str(p.get("team_id", "")) in today_team_ids]
 
         # ── Exclude sidelined players from today rankings ─────────────────────
@@ -1819,6 +1826,7 @@ def nightly_run():
                 "had_contribution": (g > 0 or a > 0),
                 "minutes_played":   mins,
                 "dnp":              mins is not None and mins == 0,
+                "sub_on":           pid in sub_player_ids and mins is not None and mins > 0,
                 "outcome_recorded": True,
             })
 
@@ -1858,6 +1866,7 @@ def nightly_run():
                     "had_contribution": False,
                     "minutes_played":   mins,
                     "dnp":              mins is not None and mins == 0,
+                    "sub_on":           pid in sub_player_ids and mins is not None and mins > 0,
                     "outcome_recorded": True,
                 })
                 recorded_pids.add(pid)
