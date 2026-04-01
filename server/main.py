@@ -124,8 +124,8 @@ def _refresh_lineup_availability():
                         sidelined = data.get("sidelined", [])
                         if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
 
-                        confirmed = any(p.get("formation_field") for p in lineups)
                         starters  = [p["player_id"] for p in lineups if p.get("type_id") == 11]
+                        confirmed = len(starters) >= 11
                         sidelined_ids = [p["player_id"] for p in sidelined]
 
                         availability[fid] = {
@@ -1003,16 +1003,18 @@ def sm_lineups_today():
             sidelined = data.get("sidelined", [])
             if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
 
-            confirmed = any(p.get("formation_field") for p in lineups)
-            starters  = [p["player_id"] for p in lineups if p.get("type_id") == 11]
+            starters      = [p["player_id"] for p in lineups if p.get("type_id") == 11]
+            subs          = [p["player_id"] for p in lineups if p.get("type_id") == 12]
             sidelined_ids = [p["player_id"] for p in sidelined]
+            confirmed     = len(starters) >= 11
 
             availability[fid] = {
                 "confirmed": confirmed,
                 "starters":  starters,
+                "subs":      subs,
                 "sidelined": sidelined_ids,
             }
-            log.info(f"Lineup fetched {fid}: confirmed={confirmed} starters={len(starters)}")
+            log.info(f"Lineup fetched {fid}: confirmed={confirmed} starters={len(starters)} subs={len(subs)}")
             _time.sleep(0.5)
         except Exception as e:
             log.warning(f"Lineup fetch error {fid}: {e}")
