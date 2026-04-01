@@ -1015,7 +1015,8 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
         detailed_pos = p.get("detailed_position_id")
         position_id  = p.get("position_id")
 
-        # Get position code — granular first, fall back to broad
+        # Determine position code and whether player has detailed position
+        has_detailed = detailed_pos is not None and detailed_pos in _GPM
         pos_code = _GPM.get(detailed_pos, (None, None))[0]
         if not pos_code and position_id:
             pos_code = {24:"GK", 25:"DEF", 26:"MID", 27:"FWD"}.get(position_id)
@@ -1023,16 +1024,11 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
             result.append(p)
             continue
 
-        # Look up multipliers — try granular first, fall back to broad
-        granular = opp_mults.get("granular", {})
-        broad    = opp_mults.get("broad", {})
-        broad_group = _BM.get(pos_code, "MID")
+        has_granular = pos_code in opp_mults.get("granular", {})
 
-        has_granular = pos_code in granular
-
-        a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist")
-        g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal")
-        _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot")
+        a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist", has_detailed)
+        g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal",   has_detailed)
+        _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot",    has_detailed)
 
         overall_flag = None
         if a_flag == "HIGH" or g_flag == "HIGH":    overall_flag = "HIGH"
