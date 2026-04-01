@@ -682,6 +682,7 @@ def get_season_scores():
                 "broad_position":       pos,
                 "detailed_position_id": row.get("detailed_position_id"),
                 "position_id":          row.get("position_id"),
+                "image_path":           row.get("image_path"),
             })
 
         players.sort(key=lambda p: p.get("tsoa_score") or 0, reverse=True)
