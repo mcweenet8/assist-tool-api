@@ -1137,14 +1137,17 @@ def sm_match(fixture_id):
         home_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id, concession_mults)
         away_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id, concession_mults)
 
-        lineup_data = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
+        lineup_data  = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
+        live_data    = {"state": None, "state_id": None, "minute": None, "score": {"home": None, "away": None}, "ht_score": {"home": None, "away": None}, "events": []}
         try:
             import requests as req
             token = os.environ.get("SPORTMONKS_API_TOKEN")
             base  = "https://api.sportmonks.com/v3/football"
-            r = req.get(f"{base}/fixtures/{fixture_id}", params={"api_token": token, "include": "lineups;formations"}, timeout=15)
+            r = req.get(f"{base}/fixtures/{fixture_id}", headers={"Authorization": token}, params={"include": "lineups;formations;scores;events;state"}, timeout=20)
             if r.status_code == 200:
                 fdata = r.json().get("data", {})
+
+                # ── Lineups ───────────────────────────────────────────────────
                 lineups = fdata.get("lineups", [])
                 if isinstance(lineups, dict): lineups = lineups.get("data", [])
                 formations = fdata.get("formations", [])
@@ -1152,6 +1155,7 @@ def sm_match(fixture_id):
                 starters  = [p for p in lineups if p.get("type_id") == 11]
                 subs      = [p for p in lineups if p.get("type_id") == 12]
                 score_map = {str(p["player_id"]): p for p in all_players}
+                name_map  = {str(p["player_id"]): p.get("player_name") for p in all_players}
 
                 def enrich(player):
                     pid = str(player.get("player_id"))
@@ -1164,6 +1168,51 @@ def sm_match(fixture_id):
                     "away_formation": next((f["formation"] for f in formations if f.get("participant_id") == away_id), None),
                     "confirmed": len(starters) >= 20,
                 }
+
+                # ── State / clock ─────────────────────────────────────────────
+                state_obj = fdata.get("state", {})
+                if isinstance(state_obj, dict) and "data" in state_obj: state_obj = state_obj["data"]
+                state_id  = fdata.get("state_id") or (state_obj.get("id") if state_obj else None)
+                is_live   = state_id in [2, 3, 4, 6, 7, 10, 11, 12, 13, 14, 15]
+                live_data["state"]    = state_obj.get("name") if state_obj else None
+                live_data["state_id"] = state_id
+                live_data["minute"]   = fdata.get("minute") or fdata.get("length")
+
+                # ── Scores ────────────────────────────────────────────────────
+                scores = fdata.get("scores", [])
+                if isinstance(scores, dict): scores = scores.get("data", [])
+                for s in scores:
+                    desc = s.get("description", "")
+                    part = s.get("score", {}).get("participant")
+                    goals = s.get("score", {}).get("goals")
+                    if desc == "CURRENT":
+                        if part == "home": live_data["score"]["home"] = goals
+                        elif part == "away": live_data["score"]["away"] = goals
+                    elif desc == "1ST_HALF":
+                        if part == "home": live_data["ht_score"]["home"] = goals
+                        elif part == "away": live_data["ht_score"]["away"] = goals
+
+                # ── Events ────────────────────────────────────────────────────
+                events = fdata.get("events", [])
+                if isinstance(events, dict): events = events.get("data", [])
+                key_events = []
+                for e in events:
+                    if e.get("type_id") != 14: continue  # goals only
+                    pid      = str(e.get("player_id", ""))
+                    apid     = str(e.get("related_player_id", ""))
+                    team_id  = e.get("participant_id")
+                    pname    = name_map.get(pid) or f"Player {pid}"
+                    aname    = name_map.get(apid) if apid and apid != "None" else None
+                    key_events.append({
+                        "minute":      e.get("minute"),
+                        "player_name": pname,
+                        "assist_name": aname,
+                        "team_id":     team_id,
+                        "is_home":     str(team_id) == str(home_id),
+                    })
+                key_events.sort(key=lambda x: x.get("minute") or 0)
+                live_data["events"] = key_events
+
         except Exception as e:
             log.error(f"lineup pull error {fixture_id}: {e}")
 
@@ -1187,7 +1236,8 @@ def sm_match(fixture_id):
             "home_players": add_sidelined(home_players[:15]),
             "away_players": add_sidelined(away_players[:15]),
             "total_home": len(home_players), "total_away": len(away_players),
-            "home_ha": home_ha, "away_ha": away_ha, "lineup": lineup_data,
+            "home_ha": home_ha, "away_ha": away_ha,
+            "lineup": lineup_data, "live": live_data,
         }
         # Only cache if we have valid data — never cache empty/error responses
         if home_name and away_name:
