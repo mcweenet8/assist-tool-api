@@ -24,6 +24,32 @@ from .pipeline_comparison import build_comparison_for_date, record_outcomes, get
 from .sm_fixtures import get_sm_fixtures
 
 
+# ── Sidelined helpers ────────────────────────────────────────────────────────
+
+def get_sidelined_player_ids(team_ids=None):
+    try:
+        from supabase import create_client
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+        q = sb.table("player_sidelined")            .select("player_id")            .eq("completed", False)            .gte("start_date", "2025-07-01")            .gte("games_missed", 5)
+        if team_ids:
+            q = q.in_("team_id", list(team_ids))
+        rows = q.execute().data
+        return {r["player_id"] for r in rows}
+    except Exception as e:
+        log.warning(f"get_sidelined_player_ids error: {e}")
+        return set()
+
+def get_sidelined_data(player_id):
+    try:
+        from supabase import create_client
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+        rows = sb.table("player_sidelined")            .select("injury_type, start_date, end_date, games_missed, completed")            .eq("player_id", player_id)            .eq("completed", False)            .gte("start_date", "2025-07-01")            .order("start_date", desc=True)            .limit(1).execute().data
+        return rows[0] if rows else None
+    except Exception as e:
+        log.warning(f"get_sidelined_data error: {e}")
+        return None
+
+
 # ── Boot — pre-warm season scores cache ──────────────────────────────────────
 
 def _prewarm_cache():
@@ -1116,10 +1142,25 @@ def sm_match(fixture_id):
         except Exception as e:
             log.error(f"lineup pull error {fixture_id}: {e}")
 
+        # ── Add sidelined data to players ────────────────────────────────────
+        sidelined_home = get_sidelined_player_ids(team_ids={int(home_id)})
+        sidelined_away = get_sidelined_player_ids(team_ids={int(away_id)})
+        all_sidelined  = sidelined_home | sidelined_away
+
+        def add_sidelined(players):
+            result = []
+            for p in players:
+                pid = p.get("player_id")
+                if pid in all_sidelined:
+                    p = {**p, "sidelined": get_sidelined_data(pid)}
+                result.append(p)
+            return result
+
         return jsonify({
             "fixture_id": fixture_id, "home": home_name, "away": away_name,
             "home_id": home_id, "away_id": away_id,
-            "home_players": home_players[:15], "away_players": away_players[:15],
+            "home_players": add_sidelined(home_players[:15]),
+            "away_players": add_sidelined(away_players[:15]),
             "total_home": len(home_players), "total_away": len(away_players),
             "home_ha": home_ha, "away_ha": away_ha, "lineup": lineup_data,
         })
@@ -1127,6 +1168,15 @@ def sm_match(fixture_id):
     except Exception as e:
         log.error(f"sm_match {fixture_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/sm/player-sidelined/<int:player_id>', methods=['GET'])
+def sm_player_sidelined(player_id):
+    try:
+        data = get_sidelined_data(player_id)
+        return jsonify({"sidelined": data})
+    except Exception as e:
+        return jsonify({"sidelined": None, "error": str(e)}), 500
 
 
 @app.route('/api/sm/team-form/<int:team_id>', methods=['GET'])
@@ -1624,6 +1674,14 @@ def nightly_run():
             today_team_ids.add(str(m.get("away_id", "")))
 
         today_players   = [p for p in all_players if str(p.get("team_id", "")) in today_team_ids]
+
+        # ── Exclude sidelined players from today rankings ─────────────────────
+        today_team_id_ints = {int(t) for t in today_team_ids if t}
+        sidelined_ids = get_sidelined_player_ids(team_ids=today_team_id_ints)
+        if sidelined_ids:
+            log.info(f"Nightly: excluding {len(sidelined_ids)} sidelined players from today rankings")
+            today_players = [p for p in today_players if p.get("player_id") not in sidelined_ids]
+
         assist_ranked   = sorted(today_players, key=lambda x: x.get("assist_index") or 0, reverse=True)
         goal_ranked     = sorted(today_players, key=lambda x: x.get("goal_score") or 0, reverse=True)
         tsoa_ranked     = sorted(today_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
@@ -1874,7 +1932,75 @@ def nightly_run():
             log.error(f"Nightly league averages error: {e}")
             summary["errors"].append(f"league_avgs:{str(e)}")
 
-        # ── Step 6: Refresh season scores cache ───────────────────────────────
+        # ── Step 6: Sync sidelined players ───────────────────────────────────
+        log.info("Nightly: syncing sidelined players...")
+        try:
+            import requests as _req
+            all_team_ids = set()
+            for f in today_fixtures:
+                if f.get("home_id"): all_team_ids.add(int(f["home_id"]))
+                if f.get("away_id"): all_team_ids.add(int(f["away_id"]))
+            sidelined_updated = 0
+            for team_id in all_team_ids:
+                try:
+                    r = _req.get(
+                        f"https://api.sportmonks.com/v3/football/teams/{team_id}",
+                        headers={"Authorization": os.environ.get("SPORTMONKS_API_TOKEN")},
+                        params={"include": "sidelined.type;sidelined.player"},
+                        timeout=15
+                    )
+                    if r.status_code != 200: continue
+                    data      = r.json().get("data", {})
+                    sidelined = data.get("sidelined", [])
+                    if isinstance(sidelined, dict): sidelined = sidelined.get("data", [])
+
+                    existing = sb.table("player_sidelined")                        .select("player_id,start_date")                        .eq("team_id", team_id).eq("completed", False).execute().data
+                    existing_keys = {(r["player_id"], r["start_date"]) for r in existing}
+                    current_keys  = set()
+
+                    for s in sidelined:
+                        player    = s.get("player", {})
+                        if isinstance(player, dict) and "data" in player: player = player["data"]
+                        type_data = s.get("type", {})
+                        if isinstance(type_data, dict) and "data" in type_data: type_data = type_data["data"]
+                        pid        = player.get("id") or s.get("player_id")
+                        pname      = player.get("display_name") or player.get("name")
+                        start_date = s.get("start_date")
+                        if not pid: continue
+                        current_keys.add((pid, start_date))
+                        record = {
+                            "player_id":    pid, "team_id": team_id,
+                            "player_name":  pname,
+                            "injury_type":  type_data.get("name", "Unknown"),
+                            "start_date":   start_date,
+                            "end_date":     s.get("end_date"),
+                            "completed":    s.get("completed") or False,
+                            "games_missed": s.get("games_missed") or 0,
+                            "last_updated": datetime.now().isoformat()
+                        }
+                        existing_row = sb.table("player_sidelined")                            .select("id").eq("player_id", pid).eq("team_id", team_id)                            .eq("start_date", start_date or "1900-01-01").execute().data
+                        if existing_row:
+                            sb.table("player_sidelined").update(record).eq("id", existing_row[0]["id"]).execute()
+                        else:
+                            sb.table("player_sidelined").insert({**record, "league_id": next(
+                                (f["league_id"] for f in today_fixtures
+                                 if int(f.get("home_id",0))==team_id or int(f.get("away_id",0))==team_id), 0
+                            )}).execute()
+                        sidelined_updated += 1
+
+                    # Mark stale records as completed
+                    for (pid, sdate) in (existing_keys - current_keys):
+                        sb.table("player_sidelined").update({"completed": True, "last_updated": datetime.now().isoformat()})                            .eq("player_id", pid).eq("team_id", team_id)                            .eq("start_date", sdate or "1900-01-01").execute()
+                    import time as _time
+                    _time.sleep(0.3)
+                except Exception as te:
+                    log.warning(f"Sidelined sync team {team_id}: {te}")
+            log.info(f"Nightly: sidelined sync complete — {sidelined_updated} records")
+            summary["sidelined_updated"] = sidelined_updated
+        except Exception as e:
+            log.error(f"Nightly sidelined sync error: {e}")
+
+        # ── Step 7: Refresh season scores cache ───────────────────────────────
         log.info("Nightly: refreshing season scores cache...")
         try:
             _cache["season_scores"]         = get_season_scores()
