@@ -1949,6 +1949,7 @@ def nightly_run():
                     "assist_index":     p.get("assist_index_adj") or p.get("assist_index"),
                     "goal_score":       p.get("goal_score_adj")   or p.get("goal_score"),
                     "tsoa_score":       p.get("tsoa_score_adj")   or p.get("tsoa_score"),
+                    "shots_score":      p.get("shots_score"),
                     "sot_score":        p.get("sot_score"),
                     "concession_flag":  ctx.get("concession_flag"),
                     "actual_goals":     0,
