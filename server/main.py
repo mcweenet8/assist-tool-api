@@ -636,15 +636,15 @@ def sm_results():
             played       = [r for r in date_rows if not r.get("dnp")]
             contributors = [r for r in played if r.get("had_contribution")]
 
-            # Rank lists — contributors only, for Hit% (top_n_rate divides by 20)
-            assist_ranks = [r["sm_assist_rank"] for r in contributors if r.get("sm_assist_rank")]
-            goal_ranks   = [r["sm_goal_rank"]   for r in contributors if r.get("sm_goal_rank")]
-            tsoa_ranks   = [r["sm_tsoa_rank"]   for r in contributors if r.get("sm_tsoa_rank")]
+            # Market-exclusive contributors
+            assist_contributors = [r for r in played if (r.get("actual_assists") or 0) > 0]
+            goal_contributors   = [r for r in played if (r.get("actual_goals")   or 0) > 0]
+            tsoa_contributors   = [r for r in played if r.get("had_contribution")]
 
-            # Median rank — all played players ranked in top 20 (including non-contributors)
-            # This gives a truer picture of model accuracy
-            assist_all_top20 = [r["sm_assist_rank"] for r in played if r.get("sm_assist_rank") and r["sm_assist_rank"] <= 20]
-            goal_all_top20   = [r["sm_goal_rank"]   for r in played if r.get("sm_goal_rank")   and r["sm_goal_rank"]   <= 20]
+            # Rank lists — market-exclusive
+            assist_ranks = [r["sm_assist_rank"] for r in assist_contributors if r.get("sm_assist_rank")]
+            goal_ranks   = [r["sm_goal_rank"]   for r in goal_contributors   if r.get("sm_goal_rank")]
+            tsoa_ranks   = [r["sm_tsoa_rank"]   for r in tsoa_contributors   if r.get("sm_tsoa_rank")]
 
             # Count DNPs that were in our top 20 — shown separately for transparency
             dnp_rows = [r for r in date_rows if r.get("dnp")]
@@ -661,19 +661,17 @@ def sm_results():
             def top_n_count(lst, n):
                 return sum(1 for r in lst if r <= n)
 
-            total_contributors = len(contributors)
-
             summaries[date] = {
                 "total_fixtures":     len(set(r["fixture_id"] for r in date_rows)),
-                "total_contributors": total_contributors,
+                "total_contributors": len(tsoa_contributors),
                 "dnp_count":          len(dnp_rows),
                 "assist": {
                     "median_rank":   median(assist_ranks),
                     "top20_rate":    top_n_rate(assist_ranks),
                     "top20_count":   top_n_count(assist_ranks, 20),
                     "top100_count":  top_n_count(assist_ranks, 100),
-                    "outside_count": total_contributors - top_n_count(assist_ranks, 100),
-                    "total":         total_contributors,
+                    "outside_count": len(assist_contributors) - top_n_count(assist_ranks, 100),
+                    "total":         len(assist_contributors),
                     "dnp_top20":     dnp_top20_assist,
                 },
                 "goal": {
@@ -681,8 +679,8 @@ def sm_results():
                     "top20_rate":    top_n_rate(goal_ranks),
                     "top20_count":   top_n_count(goal_ranks, 20),
                     "top100_count":  top_n_count(goal_ranks, 100),
-                    "outside_count": total_contributors - top_n_count(goal_ranks, 100),
-                    "total":         total_contributors,
+                    "outside_count": len(goal_contributors) - top_n_count(goal_ranks, 100),
+                    "total":         len(goal_contributors),
                     "dnp_top20":     dnp_top20_goal,
                 },
                 "tsoa": {
@@ -690,8 +688,8 @@ def sm_results():
                     "top20_rate":    top_n_rate(tsoa_ranks),
                     "top20_count":   top_n_count(tsoa_ranks, 20),
                     "top100_count":  top_n_count(tsoa_ranks, 100),
-                    "outside_count": total_contributors - top_n_count(tsoa_ranks, 100),
-                    "total":         total_contributors,
+                    "outside_count": len(tsoa_contributors) - top_n_count(tsoa_ranks, 100),
+                    "total":         len(tsoa_contributors),
                 },
             }
 
