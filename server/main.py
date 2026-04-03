@@ -1787,69 +1787,38 @@ def nightly_run():
             log.info(f"Nightly: excluding {len(sidelined_ids)} sidelined players from today rankings")
             today_players = [p for p in today_players if p.get("player_id") not in sidelined_ids]
 
-        # Build today-context for concession flags FIRST — so ranks use PE-adjusted scores
+        # Build PE context using the same get_multipliers() as today-context endpoint
+        nightly_context = {}
         try:
-            from .positional_concessions import GRANULAR_POSITION_MAP as GPM, BROAD_MAP as BM
-            from .positional_concessions import THRESHOLD_HIGH, THRESHOLD_MEDIUM
-            ABS_GOAL_THRESH   = {"GK":99,"DEF":0.27,"MID":0.75,"FWD":0.85}
-            ABS_ASSIST_THRESH = {"GK":99,"DEF":0.30,"MID":0.70,"FWD":0.40}
-
-            season_ids = list({f["season_id"] for f in today_fixtures})
-            avg_rows   = sb.table("positional_concessions_league_avg")\
-                .select("*").eq("granularity","broad").in_("season_id", season_ids).execute().data
-            avg_map = {}
-            for row in avg_rows:
-                sid = row["season_id"]
-                if sid not in avg_map: avg_map[sid] = {}
-                avg_map[sid][row["broad_position"]] = row
-
-            tids_by_season = {}
+            from .positional_concessions import get_multipliers, GRANULAR_POSITION_MAP as GPM, BROAD_MAP as BM, apply_concession_multiplier as acm
             for f in today_fixtures:
-                sid = f["season_id"]
-                if sid not in tids_by_season: tids_by_season[sid] = set()
-                if f.get("home_id"): tids_by_season[sid].add(int(f["home_id"]))
-                if f.get("away_id"): tids_by_season[sid].add(int(f["away_id"]))
-
-            broad_conc = {}
-            for sid, tids in tids_by_season.items():
-                rows = sb.table("positional_concessions_broad")\
-                    .select("*").eq("season_id",sid).in_("team_id",list(tids)).execute().data
-                for row in rows:
-                    broad_conc[(row["team_id"],sid,row["broad_position"])] = row
-
-            nightly_context = {}
-            for f in today_fixtures:
-                sid = f["season_id"]
+                fid    = f.get("match_id")
+                sid    = f.get("season_id")
+                lid    = f.get("league_id")
+                if not fid or not sid or not lid: continue
+                try:
+                    mults = get_multipliers(fid, sid, lid)
+                except Exception as e:
+                    log.warning(f"Nightly get_multipliers {fid}: {e}")
+                    continue
                 for team_id, opp_id in [(f.get("home_id"), f.get("away_id")), (f.get("away_id"), f.get("home_id"))]:
-                    avgs = avg_map.get(sid, {})
-                    for bp in ["GK","DEF","MID","FWD"]:
-                        row = broad_conc.get((int(opp_id), sid, bp))
-                        if not row: continue
-                        gp  = row["games_played"] or 1
-                        gpg = row["goals_conceded"] / gp
-                        apg = row["assists_conceded"] / gp
-                        avg_g = avgs.get(bp,{}).get("avg_goals_per_game",0.001) or 0.001
-                        avg_a = avgs.get(bp,{}).get("avg_assists_per_game",0.001) or 0.001
-                        g_mult = gpg / avg_g
-                        a_mult = apg / avg_a
-                        abs_g  = gpg >= ABS_GOAL_THRESH.get(bp, 99)
-                        abs_a  = apg >= ABS_ASSIST_THRESH.get(bp, 99)
-                        flag = None
-                        if g_mult >= THRESHOLD_HIGH or a_mult >= THRESHOLD_HIGH or abs_g or abs_a:
-                            flag = "HIGH"
-                        elif g_mult >= THRESHOLD_MEDIUM or a_mult >= THRESHOLD_MEDIUM:
-                            flag = "MEDIUM"
-                        if not flag: continue
-                        for p in today_players:
-                            if str(p.get("team_id")) != str(team_id): continue
-                            dp  = p.get("detailed_position_id")
-                            pid_pos = p.get("position_id")
-                            pc  = GPM.get(dp, (None,None))[0]
-                            if not pc and pid_pos:
-                                pc = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(pid_pos)
-                            if not pc: continue
-                            if BM.get(pc,"MID") == bp:
-                                nightly_context[str(p["player_id"])] = {"concession_flag": flag}
+                    opp_mults = mults.get(int(opp_id) if opp_id else 0, {})
+                    if not opp_mults: continue
+                    for p in today_players:
+                        if str(p.get("team_id")) != str(team_id): continue
+                        dp      = p.get("detailed_position_id")
+                        pos_id  = p.get("position_id")
+                        pc      = GPM.get(dp, (None, None))[0]
+                        if not pc and pos_id:
+                            pc = {24:"GK", 25:"DEF", 26:"MID", 27:"FWD"}.get(pos_id)
+                        if not pc: continue
+                        _, _, a_flag = acm(p.get("assist_index") or 0, pc, opp_mults, "assist")
+                        _, _, g_flag = acm(p.get("goal_score")   or 0, pc, opp_mults, "goal")
+                        overall = None
+                        if a_flag == "HIGH" or g_flag == "HIGH":     overall = "HIGH"
+                        elif a_flag == "MEDIUM" or g_flag == "MEDIUM": overall = "MEDIUM"
+                        if overall:
+                            nightly_context[str(p["player_id"])] = {"concession_flag": overall}
         except Exception as e:
             log.error(f"Nightly context error: {e}")
             nightly_context = {}
@@ -1872,12 +1841,12 @@ def nightly_run():
         tsoa_ranked     = sorted(ranked_players, key=lambda x: x.get("tsoa_score_adj")   or 0, reverse=True)
         shots_ranked    = sorted(ranked_players, key=lambda x: x.get("shots_score")      or 0, reverse=True)
         sot_ranked      = sorted(ranked_players, key=lambda x: x.get("sot_score")        or 0, reverse=True)
-        assist_rank_map = {p["player_id"]: i+1 for i, p in enumerate(assist_ranked)}
-        goal_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(goal_ranked)}
-        tsoa_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(tsoa_ranked)}
-        shots_rank_map  = {p["player_id"]: i+1 for i, p in enumerate(shots_ranked)}
-        sot_rank_map    = {p["player_id"]: i+1 for i, p in enumerate(sot_ranked)}
-        today_players   = ranked_players  # downstream uses adjusted players
+        assist_rank_map = {str(p["player_id"]): i+1 for i, p in enumerate(assist_ranked)}
+        goal_rank_map   = {str(p["player_id"]): i+1 for i, p in enumerate(goal_ranked)}
+        tsoa_rank_map   = {str(p["player_id"]): i+1 for i, p in enumerate(tsoa_ranked)}
+        shots_rank_map  = {str(p["player_id"]): i+1 for i, p in enumerate(shots_ranked)}
+        sot_rank_map    = {str(p["player_id"]): i+1 for i, p in enumerate(sot_ranked)}
+        player_lookup   = {str(p["player_id"]): p for p in ranked_players}
 
         actual_goals   = {}
         actual_assists = {}
@@ -1916,7 +1885,7 @@ def nightly_run():
         all_pids      = set(list(actual_goals.keys()) + list(actual_assists.keys()))
         outcome_rows  = []
         for pid in all_pids:
-            p   = player_lookup.get(pid, {})
+            p   = player_lookup.get(str(pid), {})
             g   = actual_goals.get(pid, 0)
             a   = actual_assists.get(pid, 0)
             ctx = nightly_context.get(str(pid), {})
@@ -1928,11 +1897,11 @@ def nightly_run():
                 "player_name":      p.get("player_name"),
                 "team_name":        p.get("team_name"),
                 "league_id":        p.get("league_id"),
-                "sm_assist_rank":   assist_rank_map.get(pid),
-                "sm_goal_rank":     goal_rank_map.get(pid),
-                "sm_tsoa_rank":     tsoa_rank_map.get(pid),
-                "sm_shots_rank":    shots_rank_map.get(pid),
-                "sm_sot_rank":      sot_rank_map.get(pid),
+                "sm_assist_rank":   assist_rank_map.get(str(pid)),
+                "sm_goal_rank":     goal_rank_map.get(str(pid)),
+                "sm_tsoa_rank":     tsoa_rank_map.get(str(pid)),
+                "sm_shots_rank":    shots_rank_map.get(str(pid)),
+                "sm_sot_rank":      sot_rank_map.get(str(pid)),
                 "assist_index":     p.get("assist_index_adj") or p.get("assist_index"),
                 "goal_score":       p.get("goal_score_adj")   or p.get("goal_score"),
                 "tsoa_score":       p.get("tsoa_score_adj")   or p.get("tsoa_score"),
@@ -1972,15 +1941,14 @@ def nightly_run():
                     "player_name":      p.get("player_name"),
                     "team_name":        p.get("team_name"),
                     "league_id":        p.get("league_id"),
-                    "sm_assist_rank":   assist_rank_map.get(pid),
-                    "sm_goal_rank":     goal_rank_map.get(pid),
-                    "sm_tsoa_rank":     tsoa_rank_map.get(pid),
-                    "sm_shots_rank":    shots_rank_map.get(pid),
-                    "sm_sot_rank":      sot_rank_map.get(pid),
+                    "sm_assist_rank":   assist_rank_map.get(str(pid)),
+                    "sm_goal_rank":     goal_rank_map.get(str(pid)),
+                    "sm_tsoa_rank":     tsoa_rank_map.get(str(pid)),
+                    "sm_shots_rank":    shots_rank_map.get(str(pid)),
+                    "sm_sot_rank":      sot_rank_map.get(str(pid)),
                     "assist_index":     p.get("assist_index_adj") or p.get("assist_index"),
                     "goal_score":       p.get("goal_score_adj")   or p.get("goal_score"),
                     "tsoa_score":       p.get("tsoa_score_adj")   or p.get("tsoa_score"),
-                    "shots_score":      p.get("shots_score"),
                     "sot_score":        p.get("sot_score"),
                     "concession_flag":  ctx.get("concession_flag"),
                     "actual_goals":     0,
