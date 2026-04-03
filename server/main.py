@@ -67,9 +67,16 @@ def get_sidelined_data(player_id):
 def _prewarm_cache():
     try:
         log.info("Pre-warming season scores cache...")
-        _cache["season_scores"] = get_season_scores()
+        # Check Redis first — survives restarts
+        existing = _cache.get("season_scores")
+        if existing and existing.get("players"):
+            log.info(f"Season scores loaded from Redis: {existing.get('count', 0)} players")
+            return
+        log.info("Redis cold — computing season scores from Supabase...")
+        result = get_season_scores()
+        _cache.set("season_scores", result, ttl=86400)  # 24hr Redis TTL
         _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        log.info(f"Season scores cached: {_cache['season_scores'].get('count', 0)} players")
+        log.info(f"Season scores cached: {result.get('count', 0)} players")
     except Exception as e:
         log.error(f"Pre-warm error: {e}")
 
@@ -524,9 +531,10 @@ def sm_today_context():
 @app.route('/api/sm/season/refresh', methods=['POST'])
 def sm_season_refresh():
     def run():
-        _cache["season_scores"] = get_season_scores()
+        result = get_season_scores()
+        _cache.set("season_scores", result, ttl=86400)
         _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        log.info("Season scores cache force refreshed")
+        log.info("Season scores cache force refreshed and written to Redis")
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"status": "ok", "message": "Season scores refreshing"})
 
@@ -545,11 +553,14 @@ def sm_data():
 
 @app.route('/api/sm/season', methods=['GET'])
 def sm_season():
-    # Cache 24 hours — season scores change only on nightly refresh
-    if not _cache.get("season_scores") or not _cache_valid("season_scores", 86400):
-        _cache_set("season_scores", get_season_scores())
-        _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    return jsonify(_cache["season_scores"])
+    cached = _cache.get("season_scores")
+    if cached and cached.get("players"):
+        return jsonify(cached)
+    # Cache miss — compute and store with 24hr Redis TTL
+    result = get_season_scores()
+    _cache.set("season_scores", result, ttl=86400)
+    _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return jsonify(result)
 
 
 @app.route('/api/sm/fixtures', methods=['GET'])
@@ -2103,8 +2114,10 @@ def nightly_run():
         # ── Step 7: Refresh season scores cache ───────────────────────────────
         log.info("Nightly: refreshing season scores cache...")
         try:
-            _cache["season_scores"]         = get_season_scores()
+            result = get_season_scores()
+            _cache.set("season_scores", result, ttl=86400)  # 24hr Redis TTL — survives restarts
             _cache["season_scores_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            log.info(f"Nightly: season scores written to Redis — {result.get('count', 0)} players")
         except Exception as e:
             log.error(f"Nightly season scores refresh error: {e}")
 
