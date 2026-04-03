@@ -305,9 +305,11 @@ def refresh():
 
 @app.route('/api/sm/today-context', methods=['GET'])
 def sm_today_context():
-    # Serve from cache if fresh (5 min TTL)
-    if _cache_valid("today_context", 300) and _cache.get("today_context"):
-        return jsonify(_cache["today_context"])
+    # Serve from cache if fresh (5 min TTL) — keyed by date
+    date_param = request.args.get("date", "today")
+    cache_key  = f"today_context_{date_param}"
+    if _cache_valid(cache_key, 300) and _cache.get(cache_key):
+        return jsonify(_cache[cache_key])
     try:
         from .positional_concessions import apply_concession_multiplier, GRANULAR_POSITION_MAP, BROAD_MAP
         from supabase import create_client
@@ -318,7 +320,15 @@ def sm_today_context():
         fixtures    = _cache.get("fixtures", {})
         season_data = _cache.get("season_scores", {})
         players     = season_data.get("players", [])
-        today       = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+        date_param  = request.args.get("date", "today")
+        tz          = pytz.timezone("America/New_York")
+        now_local   = datetime.now(tz)
+        if date_param == "tomorrow":
+            from datetime import timedelta
+            target_date = (now_local + timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            target_date = now_local.strftime("%Y-%m-%d")
+        today       = target_date  # keep variable name for rest of function
 
         LEAGUE_SEASON_MAP_LOCAL = {
             8:25583, 9:25648, 564:25659, 384:25533,
@@ -520,7 +530,7 @@ def sm_today_context():
             "fixture_availability": fixture_availability,
             "team_to_fixture":      team_to_fixture,
         }
-        _cache_set("today_context", response)
+        _cache_set(cache_key, response)
         return jsonify(response)
 
     except Exception as e:
