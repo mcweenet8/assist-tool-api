@@ -1789,18 +1789,7 @@ def nightly_run():
             log.info(f"Nightly: excluding {len(sidelined_ids)} sidelined players from today rankings")
             today_players = [p for p in today_players if p.get("player_id") not in sidelined_ids]
 
-        assist_ranked   = sorted(today_players, key=lambda x: x.get("assist_index") or 0, reverse=True)
-        goal_ranked     = sorted(today_players, key=lambda x: x.get("goal_score") or 0, reverse=True)
-        tsoa_ranked     = sorted(today_players, key=lambda x: x.get("tsoa_score") or 0, reverse=True)
-        shots_ranked    = sorted(today_players, key=lambda x: x.get("shots_score") or 0, reverse=True)
-        sot_ranked      = sorted(today_players, key=lambda x: x.get("sot_score") or 0, reverse=True)
-        assist_rank_map = {p["player_id"]: i+1 for i, p in enumerate(assist_ranked)}
-        goal_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(goal_ranked)}
-        tsoa_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(tsoa_ranked)}
-        shots_rank_map  = {p["player_id"]: i+1 for i, p in enumerate(shots_ranked)}
-        sot_rank_map    = {p["player_id"]: i+1 for i, p in enumerate(sot_ranked)}
-
-        # Build today-context for concession flags
+        # Build today-context for concession flags FIRST — so ranks use PE-adjusted scores
         try:
             from .positional_concessions import GRANULAR_POSITION_MAP as GPM, BROAD_MAP as BM
             from .positional_concessions import THRESHOLD_HIGH, THRESHOLD_MEDIUM
@@ -1867,6 +1856,31 @@ def nightly_run():
             log.error(f"Nightly context error: {e}")
             nightly_context = {}
 
+        # Apply PE multipliers to scores before ranking — matches Today tab behaviour
+        ranked_players = []
+        for p in today_players:
+            ctx  = nightly_context.get(str(p["player_id"]), {})
+            flag = ctx.get("concession_flag")
+            mult = 1.25 if flag == "HIGH" else 1.10 if flag == "MEDIUM" else 1.0
+            ranked_players.append({
+                **p,
+                "assist_index_adj": round((p.get("assist_index") or 0) * mult, 3),
+                "goal_score_adj":   round((p.get("goal_score")   or 0) * mult, 3),
+                "tsoa_score_adj":   round((p.get("tsoa_score")   or 0) * mult, 3),
+            })
+
+        assist_ranked   = sorted(ranked_players, key=lambda x: x.get("assist_index_adj") or 0, reverse=True)
+        goal_ranked     = sorted(ranked_players, key=lambda x: x.get("goal_score_adj")   or 0, reverse=True)
+        tsoa_ranked     = sorted(ranked_players, key=lambda x: x.get("tsoa_score_adj")   or 0, reverse=True)
+        shots_ranked    = sorted(ranked_players, key=lambda x: x.get("shots_score")      or 0, reverse=True)
+        sot_ranked      = sorted(ranked_players, key=lambda x: x.get("sot_score")        or 0, reverse=True)
+        assist_rank_map = {p["player_id"]: i+1 for i, p in enumerate(assist_ranked)}
+        goal_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(goal_ranked)}
+        tsoa_rank_map   = {p["player_id"]: i+1 for i, p in enumerate(tsoa_ranked)}
+        shots_rank_map  = {p["player_id"]: i+1 for i, p in enumerate(shots_ranked)}
+        sot_rank_map    = {p["player_id"]: i+1 for i, p in enumerate(sot_ranked)}
+        today_players   = ranked_players  # downstream uses adjusted players
+
         actual_goals   = {}
         actual_assists = {}
         player_fixture = {}
@@ -1921,9 +1935,9 @@ def nightly_run():
                 "sm_tsoa_rank":     tsoa_rank_map.get(pid),
                 "sm_shots_rank":    shots_rank_map.get(pid),
                 "sm_sot_rank":      sot_rank_map.get(pid),
-                "assist_index":     p.get("assist_index"),
-                "goal_score":       p.get("goal_score"),
-                "tsoa_score":       p.get("tsoa_score"),
+                "assist_index":     p.get("assist_index_adj") or p.get("assist_index"),
+                "goal_score":       p.get("goal_score_adj")   or p.get("goal_score"),
+                "tsoa_score":       p.get("tsoa_score_adj")   or p.get("tsoa_score"),
                 "shots_score":      p.get("shots_score"),
                 "sot_score":        p.get("sot_score"),
                 "concession_flag":  ctx.get("concession_flag"),
@@ -1965,9 +1979,9 @@ def nightly_run():
                     "sm_tsoa_rank":     tsoa_rank_map.get(pid),
                     "sm_shots_rank":    shots_rank_map.get(pid),
                     "sm_sot_rank":      sot_rank_map.get(pid),
-                    "assist_index":     p.get("assist_index"),
-                    "goal_score":       p.get("goal_score"),
-                    "tsoa_score":       p.get("tsoa_score"),
+                    "assist_index":     p.get("assist_index_adj") or p.get("assist_index"),
+                    "goal_score":       p.get("goal_score_adj")   or p.get("goal_score"),
+                    "tsoa_score":       p.get("tsoa_score_adj")   or p.get("tsoa_score"),
                     "shots_score":      p.get("shots_score"),
                     "sot_score":        p.get("sot_score"),
                     "concession_flag":  ctx.get("concession_flag"),
