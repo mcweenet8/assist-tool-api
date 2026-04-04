@@ -1544,6 +1544,8 @@ def nightly_run():
     5. Recalculate league averages
     6. Refresh season scores cache
     """
+    target_date = request.args.get("date") or request.json.get("date") if request.is_json else request.args.get("date")
+
     def run_nightly():
         import requests as req
         import pytz
@@ -1553,7 +1555,7 @@ def nightly_run():
         sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
         token  = os.environ.get("SPORTMONKS_API_TOKEN")
         sm     = "https://api.sportmonks.com/v3/football"
-        today  = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+        today  = target_date or datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
 
         LEAGUE_MAP = {
             8:    {"season_id": 25583, "name": "Premier League"},
@@ -1868,8 +1870,8 @@ def nightly_run():
                     if not pc and pos_id:
                         pc = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(pos_id)
                     if not pc: continue
-                    adj_a, mult_a, a_flag = acm(p.get("assist_index") or 0, pc, opp_mults, "assist")
-                    adj_g, mult_g, g_flag = acm(p.get("goal_score")   or 0, pc, opp_mults, "goal")
+                    adj_a, mult_a, a_flag = acm(p.get("assist_index") or 0, pc, opp_mults, "assist", has_detailed_position=False)
+                    adj_g, mult_g, g_flag = acm(p.get("goal_score")   or 0, pc, opp_mults, "goal",   has_detailed_position=False)
                     overall = None
                     if a_flag == "HIGH" or g_flag == "HIGH":       overall = "HIGH"
                     elif a_flag == "MEDIUM" or g_flag == "MEDIUM": overall = "MEDIUM"
