@@ -1091,9 +1091,10 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
 
         has_granular = pos_code in opp_mults.get("granular", {})
 
-        a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist", has_detailed)
-        g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal",   has_detailed)
-        _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot",    has_detailed)
+        # Use broad-only (has_detailed_position=False) to match today-context behaviour
+        a_adj, _, a_flag = _acm(p.get("assist_index") or 0, pos_code, opp_mults, "assist", False)
+        g_adj, _, g_flag = _acm(p.get("goal_score")   or 0, pos_code, opp_mults, "goal",   False)
+        _,     _, s_flag = _acm(p.get("sot_score")    or 0, pos_code, opp_mults, "sot",    False)
 
         overall_flag = None
         if a_flag == "HIGH" or g_flag == "HIGH":    overall_flag = "HIGH"
@@ -1140,29 +1141,19 @@ def sm_match(fixture_id):
         season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
 
-        # ── Run H/A stats + PE multipliers in parallel threads ───────────────
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-            home_ha_fut = ex.submit(_get_team_ha_stats, home_id, season_id) if season_id else None
-            away_ha_fut = ex.submit(_get_team_ha_stats, away_id, season_id) if season_id else None
+        home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
+        away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
 
-            # PE multipliers — use cache if available, else fetch in thread
-            cache_key = f"mults_{fixture_id}"
-            if cache_key in _cache:
-                mults_fut = None
+        # ── Positional concession multipliers — cached per fixture ───────────
+        concession_mults = {}
+        try:
+            if season_id and league_id:
+                cache_key = f"mults_{fixture_id}"
+                if cache_key not in _cache:
+                    _cache[cache_key] = get_multipliers(fixture_id, season_id, league_id)
                 concession_mults = _cache[cache_key]
-            else:
-                mults_fut = ex.submit(get_multipliers, fixture_id, season_id, league_id) if (season_id and league_id) else None
-                concession_mults = {}
-
-            home_ha = home_ha_fut.result() if home_ha_fut else {}
-            away_ha = away_ha_fut.result() if away_ha_fut else {}
-            if mults_fut:
-                try:
-                    concession_mults = mults_fut.result(timeout=8)
-                    _cache[cache_key] = concession_mults
-                except Exception as e:
-                    log.warning(f"get_multipliers error {fixture_id}: {e}")
+        except Exception as e:
+            log.warning(f"get_multipliers error {fixture_id}: {e}")
 
         home_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id, concession_mults)
         away_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id, concession_mults)
@@ -1206,7 +1197,7 @@ def sm_match(fixture_id):
                 is_live   = state_id in [2, 3, 4, 6, 7, 10, 11, 12, 13, 14, 15]
                 live_data["state"]    = state_obj.get("name") if state_obj else None
                 live_data["state_id"] = state_id
-                live_data["minute"]   = fdata.get("minute") or fdata.get("length")
+                live_data["minute"]   = fdata.get("minute")  # do not fall back to length (seconds)
 
                 # ── Scores ────────────────────────────────────────────────────
                 scores = fdata.get("scores", [])
@@ -1227,7 +1218,7 @@ def sm_match(fixture_id):
                 if isinstance(events, dict): events = events.get("data", [])
                 key_events = []
                 for e in events:
-                    if e.get("type_id") != 14: continue  # goals only
+                    if e.get("type_id") not in [14, 15]: continue  # 14=goal, 15=own goal
                     pid      = str(e.get("player_id", ""))
                     apid     = str(e.get("related_player_id", ""))
                     team_id  = e.get("participant_id")
