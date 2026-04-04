@@ -1113,6 +1113,62 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
     return result
 
 
+@app.route('/api/sm/live-state', methods=['GET'])
+def sm_live_state():
+    import requests as _req
+    token    = os.environ.get("SPORTMONKS_API_TOKEN")
+    sm_base  = "https://api.sportmonks.com/v3/football"
+    fixtures = _cache.get("fixtures", {})
+    live_fids = []
+    for league_matches in fixtures.values():
+        for m in league_matches:
+            if m.get("live"):
+                fid = str(m.get("match_id",""))
+                if fid: live_fids.append(fid)
+
+    if not live_fids:
+        return jsonify({"live": {}, "count": 0})
+
+    # Check Redis cache first — 30s TTL
+    cache_key = "live_state_all"
+    cached = _cache.get(cache_key)
+    if _cache_valid(cache_key, 30) and cached:
+        return jsonify(cached)
+
+    live = {}
+    for fid in live_fids:
+        try:
+            r = _req.get(
+                f"{sm_base}/fixtures/{fid}",
+                headers={"Authorization": token},
+                params={"include": "scores;state"},
+                timeout=8
+            )
+            if r.status_code != 200: continue
+            data     = r.json().get("data", {})
+            minute   = data.get("minute")
+            state_id = data.get("state_id")
+            scores   = data.get("scores", [])
+            if isinstance(scores, dict): scores = scores.get("data", [])
+            home_g = away_g = None
+            for s in scores:
+                if s.get("description") == "CURRENT":
+                    sd = s.get("score", {})
+                    if sd.get("participant") == "home": home_g = sd.get("goals")
+                    elif sd.get("participant") == "away": away_g = sd.get("goals")
+            live[fid] = {
+                "minute":   minute,
+                "state_id": state_id,
+                "score":    f"{home_g} - {away_g}" if home_g is not None else None,
+            }
+        except Exception as e:
+            log.warning(f"live-state fetch {fid}: {e}")
+
+    result = {"live": live, "count": len(live)}
+    _cache_set(cache_key, result)
+    return jsonify(result)
+
+
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
     # Cache match response — shorter TTL for live matches
