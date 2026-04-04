@@ -1174,8 +1174,8 @@ def sm_match(fixture_id):
     # Cache match response — shorter TTL for live matches
     match_cache_key = f"match_response_{fixture_id}"
     cached_match = _cache.get(match_cache_key)
-    cache_ttl = 30 if cached_match and cached_match.get("live", {}).get("state_id") in [2,3,4] else 120
-    if _cache_valid(match_cache_key, cache_ttl) and cached_match and cached_match.get("home"):
+    # Main match cache — 5 minutes. Live data now served by /live endpoint separately.
+    if _cache_valid(match_cache_key, 300) and cached_match and cached_match.get("home"):
         return jsonify(cached_match)
     try:
         fixtures = _cache.get("fixtures", {})
@@ -1324,6 +1324,98 @@ def sm_match(fixture_id):
     except Exception as e:
         log.error(f"sm_match {fixture_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/sm/match/<int:fixture_id>/live', methods=['GET'])
+def sm_match_live(fixture_id):
+    import requests as _req
+    token   = os.environ.get("SPORTMONKS_API_TOKEN")
+    sm_base = "https://api.sportmonks.com/v3/football"
+
+    cache_key = f"match_live_{fixture_id}"
+    cached = _cache.get(cache_key)
+    if _cache_valid(cache_key, 20) and cached:
+        return jsonify(cached)
+
+    # Build name map from player_baselines for goal event names
+    try:
+        pb = supabase.table("player_baselines").select("player_id,name").execute().data
+        name_map = {str(r["player_id"]): r["name"] for r in pb if r.get("name")}
+    except:
+        name_map = {}
+
+    # Also check fixtures cache for home/away IDs
+    fixtures = _cache.get("fixtures", {})
+    home_id = away_id = None
+    for league_matches in fixtures.values():
+        for m in league_matches:
+            if str(m.get("match_id")) == str(fixture_id):
+                home_id = m.get("home_id")
+                away_id = m.get("away_id")
+                break
+        if home_id: break
+
+    live_data = {
+        "state": None, "state_id": None, "minute": None,
+        "score": {"home": None, "away": None},
+        "ht_score": {"home": None, "away": None},
+        "events": []
+    }
+
+    try:
+        r = _req.get(
+            f"{sm_base}/fixtures/{fixture_id}",
+            headers={"Authorization": token},
+            params={"include": "scores;state;events"},
+            timeout=10
+        )
+        if r.status_code == 200:
+            fdata = r.json().get("data", {})
+
+            state_obj = fdata.get("state", {})
+            if isinstance(state_obj, dict) and "data" in state_obj:
+                state_obj = state_obj["data"]
+            state_id = fdata.get("state_id") or (state_obj.get("id") if state_obj else None)
+            live_data["state"]    = state_obj.get("name") if state_obj else None
+            live_data["state_id"] = state_id
+            live_data["minute"]   = fdata.get("minute")
+
+            scores = fdata.get("scores", [])
+            if isinstance(scores, dict): scores = scores.get("data", [])
+            for s in scores:
+                desc  = s.get("description", "")
+                part  = s.get("score", {}).get("participant")
+                goals = s.get("score", {}).get("goals")
+                if desc == "CURRENT":
+                    if part == "home": live_data["score"]["home"] = goals
+                    elif part == "away": live_data["score"]["away"] = goals
+                elif desc == "1ST_HALF":
+                    if part == "home": live_data["ht_score"]["home"] = goals
+                    elif part == "away": live_data["ht_score"]["away"] = goals
+
+            events = fdata.get("events", [])
+            if isinstance(events, dict): events = events.get("data", [])
+            key_events = []
+            for e in events:
+                if e.get("type_id") not in [14, 15]: continue
+                pid   = str(e.get("player_id", ""))
+                apid  = str(e.get("related_player_id", ""))
+                tid   = e.get("participant_id")
+                key_events.append({
+                    "minute":      e.get("minute"),
+                    "player_name": name_map.get(pid) or f"Player {pid}",
+                    "assist_name": name_map.get(apid) if apid and apid != "None" else None,
+                    "team_id":     tid,
+                    "is_home":     str(tid) == str(home_id) if home_id else None,
+                })
+            key_events.sort(key=lambda x: x.get("minute") or 0)
+            live_data["events"] = key_events
+
+    except Exception as e:
+        log.error(f"sm_match_live {fixture_id}: {e}")
+
+    _cache_set(cache_key, live_data)
+    return jsonify(live_data)
 
 
 @app.route('/api/sm/player-sidelined/<int:player_id>', methods=['GET'])
