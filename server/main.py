@@ -1787,48 +1787,107 @@ def nightly_run():
             log.info(f"Nightly: excluding {len(sidelined_ids)} sidelined players from today rankings")
             today_players = [p for p in today_players if p.get("player_id") not in sidelined_ids]
 
-        # Build PE context using the same get_multipliers() as today-context endpoint
+        # Build PE context inline — same logic as today-context endpoint but without SM API calls
         nightly_context = {}
         try:
-            from .positional_concessions import get_multipliers, GRANULAR_POSITION_MAP as GPM, BROAD_MAP as BM, apply_concession_multiplier as acm
+            from .positional_concessions import GRANULAR_POSITION_MAP as GPM, BROAD_MAP as BM
+            from .positional_concessions import THRESHOLD_HIGH, THRESHOLD_MEDIUM
+            from .positional_concessions import apply_concession_multiplier as acm
+            ABS_GOAL_THRESH   = {"GK":99,"DEF":0.27,"MID":0.75,"FWD":0.85}
+            ABS_ASSIST_THRESH = {"GK":99,"DEF":0.30,"MID":0.70,"FWD":0.40}
+
+            season_ids = list({f["season_id"] for f in today_fixtures})
+            avg_rows   = sb.table("positional_concessions_league_avg")\
+                .select("*").eq("granularity","broad").in_("season_id", season_ids).execute().data
+            avg_map = {}
+            for row in avg_rows:
+                sid = row["season_id"]
+                if sid not in avg_map: avg_map[sid] = {}
+                avg_map[sid][row["broad_position"]] = row
+
+            tids_by_season = {}
             for f in today_fixtures:
-                fid    = f.get("match_id")
-                sid    = f.get("season_id")
-                lid    = f.get("league_id")
-                if not fid or not sid or not lid: continue
-                try:
-                    mults = get_multipliers(fid, sid, lid)
-                except Exception as e:
-                    log.warning(f"Nightly get_multipliers {fid}: {e}")
-                    continue
+                sid = f["season_id"]
+                if sid not in tids_by_season: tids_by_season[sid] = set()
+                if f.get("home_id"): tids_by_season[sid].add(int(f["home_id"]))
+                if f.get("away_id"): tids_by_season[sid].add(int(f["away_id"]))
+
+            broad_conc = {}
+            for sid, tids in tids_by_season.items():
+                rows = sb.table("positional_concessions_broad")\
+                    .select("*").eq("season_id",sid).in_("team_id",list(tids)).execute().data
+                for row in rows:
+                    broad_conc[(row["team_id"],sid,row["broad_position"])] = row
+
+            # Build opp_mults structure matching apply_concession_multiplier expectations
+            fixture_mults = {}  # fixture_id -> {team_id -> {broad: {flag, mult}}}
+            for f in today_fixtures:
+                sid = f["season_id"]
+                fid = f.get("match_id")
+                fixture_mults[fid] = {}
                 for team_id, opp_id in [(f.get("home_id"), f.get("away_id")), (f.get("away_id"), f.get("home_id"))]:
-                    opp_mults = mults.get(int(opp_id) if opp_id else 0, {})
+                    if not team_id or not opp_id: continue
+                    opp_mults = {"broad": {}, "granular": {}}
+                    avgs = avg_map.get(sid, {})
+                    for bp in ["GK","DEF","MID","FWD"]:
+                        row = broad_conc.get((int(opp_id), sid, bp))
+                        if not row: continue
+                        gp    = row["games_played"] or 1
+                        gpg   = row["goals_conceded"]   / gp
+                        apg   = row["assists_conceded"] / gp
+                        avg_g = avgs.get(bp,{}).get("avg_goals_per_game",   0.001) or 0.001
+                        avg_a = avgs.get(bp,{}).get("avg_assists_per_game", 0.001) or 0.001
+                        g_mult = gpg / avg_g
+                        a_mult = apg / avg_a
+                        abs_g  = gpg >= ABS_GOAL_THRESH.get(bp, 99)
+                        abs_a  = apg >= ABS_ASSIST_THRESH.get(bp, 99)
+                        flag = None
+                        if g_mult >= THRESHOLD_HIGH or a_mult >= THRESHOLD_HIGH or abs_g or abs_a:
+                            flag = "HIGH"
+                        elif g_mult >= THRESHOLD_MEDIUM or a_mult >= THRESHOLD_MEDIUM:
+                            flag = "MEDIUM"
+                        if flag:
+                            opp_mults["broad"][bp] = {
+                                "goal_flag":        flag,
+                                "assist_flag":      flag,
+                                "goal_multiplier":  g_mult,
+                                "assist_multiplier":a_mult,
+                            }
+                    fixture_mults[fid][str(team_id)] = opp_mults
+
+            # Apply to each player
+            for f in today_fixtures:
+                fid = f.get("match_id")
+                for p in today_players:
+                    tid = str(p.get("team_id",""))
+                    opp_mults = fixture_mults.get(fid, {}).get(tid)
                     if not opp_mults: continue
-                    for p in today_players:
-                        if str(p.get("team_id")) != str(team_id): continue
-                        dp      = p.get("detailed_position_id")
-                        pos_id  = p.get("position_id")
-                        pc      = GPM.get(dp, (None, None))[0]
-                        if not pc and pos_id:
-                            pc = {24:"GK", 25:"DEF", 26:"MID", 27:"FWD"}.get(pos_id)
-                        if not pc: continue
-                        _, _, a_flag = acm(p.get("assist_index") or 0, pc, opp_mults, "assist")
-                        _, _, g_flag = acm(p.get("goal_score")   or 0, pc, opp_mults, "goal")
-                        overall = None
-                        if a_flag == "HIGH" or g_flag == "HIGH":     overall = "HIGH"
-                        elif a_flag == "MEDIUM" or g_flag == "MEDIUM": overall = "MEDIUM"
-                        if overall:
-                            nightly_context[str(p["player_id"])] = {"concession_flag": overall}
+                    dp     = p.get("detailed_position_id")
+                    pos_id = p.get("position_id")
+                    pc     = GPM.get(dp, (None,None))[0]
+                    if not pc and pos_id:
+                        pc = {24:"GK",25:"DEF",26:"MID",27:"FWD"}.get(pos_id)
+                    if not pc: continue
+                    adj_a, mult_a, a_flag = acm(p.get("assist_index") or 0, pc, opp_mults, "assist")
+                    adj_g, mult_g, g_flag = acm(p.get("goal_score")   or 0, pc, opp_mults, "goal")
+                    overall = None
+                    if a_flag == "HIGH" or g_flag == "HIGH":       overall = "HIGH"
+                    elif a_flag == "MEDIUM" or g_flag == "MEDIUM": overall = "MEDIUM"
+                    if overall:
+                        conc_mult = max(mult_a, mult_g)
+                        nightly_context[str(p["player_id"])] = {
+                            "concession_flag":       overall,
+                            "concession_multiplier": conc_mult,
+                        }
         except Exception as e:
             log.error(f"Nightly context error: {e}")
             nightly_context = {}
 
-        # Apply PE multipliers to scores before ranking — matches Today tab behaviour
+        # Apply PE multipliers to scores before ranking — use actual multiplier matching Today tab
         ranked_players = []
         for p in today_players:
             ctx  = nightly_context.get(str(p["player_id"]), {})
-            flag = ctx.get("concession_flag")
-            mult = 1.25 if flag == "HIGH" else 1.10 if flag == "MEDIUM" else 1.0
+            mult = ctx.get("concession_multiplier", 1.0) or 1.0
             ranked_players.append({
                 **p,
                 "assist_index_adj": round((p.get("assist_index") or 0) * mult, 3),
