@@ -1114,10 +1114,9 @@ def _apply_pe_flags(players, opponent_team_id, concession_mults):
 
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
-    # Cache match response 2 minutes — short TTL to pick up lineup confirmations
+    # Cache match response — shorter TTL for live matches
     match_cache_key = f"match_response_{fixture_id}"
     cached_match = _cache.get(match_cache_key)
-    # Use shorter TTL for live matches so minute is fresh
     cache_ttl = 30 if cached_match and cached_match.get("live", {}).get("state_id") in [2,3,4] else 120
     if _cache_valid(match_cache_key, cache_ttl) and cached_match and cached_match.get("home"):
         return jsonify(cached_match)
@@ -1141,19 +1140,29 @@ def sm_match(fixture_id):
         season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
 
-        home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
-        away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
+        # ── Run H/A stats + PE multipliers in parallel threads ───────────────
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            home_ha_fut = ex.submit(_get_team_ha_stats, home_id, season_id) if season_id else None
+            away_ha_fut = ex.submit(_get_team_ha_stats, away_id, season_id) if season_id else None
 
-        # ── Positional concession multipliers — cached per fixture ───────────
-        concession_mults = {}
-        try:
-            if season_id and league_id:
-                cache_key = f"mults_{fixture_id}"
-                if cache_key not in _cache:
-                    _cache[cache_key] = get_multipliers(fixture_id, season_id, league_id)
+            # PE multipliers — use cache if available, else fetch in thread
+            cache_key = f"mults_{fixture_id}"
+            if cache_key in _cache:
+                mults_fut = None
                 concession_mults = _cache[cache_key]
-        except Exception as e:
-            log.warning(f"get_multipliers error {fixture_id}: {e}")
+            else:
+                mults_fut = ex.submit(get_multipliers, fixture_id, season_id, league_id) if (season_id and league_id) else None
+                concession_mults = {}
+
+            home_ha = home_ha_fut.result() if home_ha_fut else {}
+            away_ha = away_ha_fut.result() if away_ha_fut else {}
+            if mults_fut:
+                try:
+                    concession_mults = mults_fut.result(timeout=8)
+                    _cache[cache_key] = concession_mults
+                except Exception as e:
+                    log.warning(f"get_multipliers error {fixture_id}: {e}")
 
         home_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(home_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), away_id, concession_mults)
         away_players = _apply_pe_flags(sorted([p for p in all_players if str(p.get("team_id")) == str(away_id)], key=lambda x: x.get("tsoa_score") or 0, reverse=True), home_id, concession_mults)
