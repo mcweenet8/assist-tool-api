@@ -1117,7 +1117,9 @@ def sm_match(fixture_id):
     # Cache match response 2 minutes — short TTL to pick up lineup confirmations
     match_cache_key = f"match_response_{fixture_id}"
     cached_match = _cache.get(match_cache_key)
-    if _cache_valid(match_cache_key, 120) and cached_match and cached_match.get("home"):
+    # Use shorter TTL for live matches so minute is fresh
+    cache_ttl = 30 if cached_match and cached_match.get("live", {}).get("state_id") in [2,3,4] else 120
+    if _cache_valid(match_cache_key, cache_ttl) and cached_match and cached_match.get("home"):
         return jsonify(cached_match)
     try:
         fixtures = _cache.get("fixtures", {})
