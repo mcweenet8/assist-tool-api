@@ -746,11 +746,11 @@ def get_multipliers(fixture_id, season_id, league_id):
                     shots_flag = "MEDIUM"
 
             result[team_id]["broad"][bp] = {
-                "goal_multiplier":   round(goal_mult, 2),
-                "assist_multiplier": round(assist_mult, 2),
-                "bc_multiplier":     round(bc_mult, 2),
-                "shots_multiplier":  round(shots_mult, 2),
-                "sot_multiplier":    round(sot_mult, 2),
+                "goal_multiplier":   round(min(goal_mult, 5.0), 2),
+                "assist_multiplier": round(min(assist_mult, 5.0), 2),
+                "bc_multiplier":     round(min(bc_mult, 5.0), 2),
+                "shots_multiplier":  round(min(shots_mult, 5.0), 2),
+                "sot_multiplier":    round(min(sot_mult, 5.0), 2),
                 "goals_conceded":    row["goals_conceded"],
                 "assists_conceded":  row["assists_conceded"],
                 "shots_conceded":    row.get("shots_conceded", 0),
