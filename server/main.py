@@ -2088,19 +2088,38 @@ def nightly_run():
                 log.error(f"Nightly outcomes error fixture {fixture_id}: {e}")
                 summary["errors"].append(f"outcomes:{fixture_id}:{str(e)}")
 
-        # Build minutes lookup from match log
+        # Build minutes + shots/SOT lookup from match log
         minutes_lookup = {}
+        shots_lookup   = {}
+        sot_lookup     = {}
         for row in match_log_rows:
-            minutes_lookup[row["player_id"]] = row.get("minutes_played", 0)
+            pid_ml = row["player_id"]
+            minutes_lookup[pid_ml] = row.get("minutes_played", 0)
+            shots_lookup[pid_ml]   = int(row.get("shots_total", 0) or 0)
+            sot_lookup[pid_ml]     = int(row.get("shots_on_target", 0) or 0)
 
-        all_pids      = set(list(actual_goals.keys()) + list(actual_assists.keys()))
+        # Include all players with goals, assists, or shots recorded
+        all_pids      = set(
+            list(actual_goals.keys()) +
+            list(actual_assists.keys()) +
+            list(shots_lookup.keys())
+        )
         outcome_rows  = []
         for pid in all_pids:
-            p   = player_lookup.get(str(pid), {})
-            g   = actual_goals.get(pid, 0)
-            a   = actual_assists.get(pid, 0)
-            ctx = nightly_context.get(str(pid), {})
+            p    = player_lookup.get(str(pid), {})
+            g    = actual_goals.get(pid, 0)
+            a    = actual_assists.get(pid, 0)
+            sh   = shots_lookup.get(pid, 0)
+            sot  = sot_lookup.get(pid, 0)
+            ctx  = nightly_context.get(str(pid), {})
             mins = minutes_lookup.get(pid, None)
+
+            # Baseline comparison — did player exceed their per90 expectation?
+            baseline  = player_lookup.get(str(pid), {})
+            nineties_played = (mins / 90) if mins else None
+            shots_baseline  = (baseline.get("shots_per90") or 0) * nineties_played if nineties_played else None
+            sot_baseline    = (baseline.get("sot_per90")   or 0) * nineties_played if nineties_played else None
+
             outcome_rows.append({
                 "game_date":        today,
                 "fixture_id":       player_fixture.get(pid),
@@ -2121,6 +2140,8 @@ def nightly_run():
                 "concession_flag":  ctx.get("concession_flag"),
                 "actual_goals":     g,
                 "actual_assists":   a,
+                "actual_shots":     sh,
+                "actual_sot":       sot,
                 "had_contribution": (g > 0 or a > 0),
                 "minutes_played":   mins,
                 "dnp":              mins is not None and mins == 0,
@@ -2145,6 +2166,8 @@ def nightly_run():
                 if not fid: continue
                 ctx  = nightly_context.get(str(pid), {})
                 mins = minutes_lookup.get(pid, None)
+                sh   = shots_lookup.get(pid, 0)
+                sot  = sot_lookup.get(pid, 0)
                 outcome_rows.append({
                     "game_date":        today,
                     "fixture_id":       fid,
@@ -2165,6 +2188,8 @@ def nightly_run():
                     "concession_flag":  ctx.get("concession_flag"),
                     "actual_goals":     0,
                     "actual_assists":   0,
+                    "actual_shots":     sh,
+                    "actual_sot":       sot,
                     "had_contribution": False,
                     "minutes_played":   mins,
                     "dnp":              mins is not None and mins == 0,
