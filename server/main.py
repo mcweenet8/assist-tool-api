@@ -1247,12 +1247,19 @@ def sm_live_state():
 
 @app.route('/api/sm/match/<int:fixture_id>', methods=['GET'])
 def sm_match(fixture_id):
-    # Cache match response — shorter TTL for live matches
+    # Cache match response — TTL varies by match state
     match_cache_key = f"match_response_{fixture_id}"
     cached_match = _cache.get(match_cache_key)
-    # Main match cache — 5 minutes. Live data now served by /live endpoint separately.
-    if _cache_valid(match_cache_key, 300) and cached_match and cached_match.get("home"):
-        return jsonify(cached_match)
+    if cached_match and cached_match.get("home"):
+        state_id = cached_match.get("live", {}).get("state_id")
+        if state_id == 5:
+            ttl = 7200    # Full time — 2 hours, data never changes
+        elif state_id in [2, 3, 4]:
+            ttl = 300     # Live — 5 minutes
+        else:
+            ttl = 1800    # Upcoming / not started — 30 minutes
+        if _cache_valid(match_cache_key, ttl):
+            return jsonify(cached_match)
     try:
         fixtures = _cache.get("fixtures", {})
         home_id = away_id = home_name = away_name = league_id = None
