@@ -649,21 +649,20 @@ def _update_league_averages(season_id, league_id):
 
 # ── GET MULTIPLIERS FOR A FIXTURE ─────────────────────────────────────────────
 
-def get_multipliers(fixture_id, season_id, league_id):
-    fixture_data = _sm_get(f"fixtures/{fixture_id}", {"include": "participants"})
-    if not fixture_data:
-        return {}
-
-    fixture = fixture_data if isinstance(fixture_data, dict) else fixture_data[0]
-    participants = fixture.get("participants", [])
-    if isinstance(participants, dict): participants = participants.get("data", [])
-
-    home_team_id = away_team_id = None
-    for p in participants:
-        meta = p.get("meta", {})
-        loc  = meta.get("location", "")
-        if loc == "home": home_team_id = p.get("id")
-        elif loc == "away": away_team_id = p.get("id")
+def get_multipliers(fixture_id, season_id, league_id, home_team_id=None, away_team_id=None):
+    # If team IDs not provided, fetch from SM — avoids redundant call if caller already has them
+    if not home_team_id or not away_team_id:
+        fixture_data = _sm_get(f"fixtures/{fixture_id}", {"include": "participants"})
+        if not fixture_data:
+            return {}
+        fixture = fixture_data if isinstance(fixture_data, dict) else fixture_data[0]
+        participants = fixture.get("participants", [])
+        if isinstance(participants, dict): participants = participants.get("data", [])
+        for p in participants:
+            meta = p.get("meta", {})
+            loc  = meta.get("location", "")
+            if loc == "home": home_team_id = p.get("id")
+            elif loc == "away": away_team_id = p.get("id")
 
     if not home_team_id or not away_team_id:
         return {}
