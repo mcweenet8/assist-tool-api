@@ -83,6 +83,42 @@ def _prewarm_cache():
 threading.Thread(target=_prewarm_cache, daemon=True).start()
 
 
+def _nightly_scheduler():
+    """Background thread — fires nightly pipeline at 2:00 AM Eastern every day."""
+    import time as _time
+    import pytz as _pytz
+    from datetime import timedelta
+
+    eastern = _pytz.timezone("America/New_York")
+    log.info("Nightly scheduler started — fires at 2:00 AM Eastern")
+
+    while True:
+        try:
+            now    = datetime.now(_pytz.utc).astimezone(eastern)
+            target = now.replace(hour=2, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + timedelta(days=1)
+            seconds_until = (target - now).total_seconds()
+            log.info(f"Nightly scheduler: next run in {round(seconds_until/3600,1)}h ({target.strftime('%Y-%m-%d %H:%M ET')})")
+            _time.sleep(seconds_until)
+
+            log.info("Nightly scheduler: triggering nightly pipeline...")
+            try:
+                import requests as _req
+                railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "web-production-0e482.up.railway.app"
+                url = f"https://{railway_url}/api/nightly/run"
+                _req.post(url, timeout=30)
+                log.info(f"Nightly scheduler: triggered via {url}")
+            except Exception as e:
+                log.error(f"Nightly scheduler trigger error: {e}")
+
+        except Exception as e:
+            log.error(f"Nightly scheduler error: {e}")
+            _time.sleep(60)
+
+threading.Thread(target=_nightly_scheduler, daemon=True).start()
+
+
 def _refresh_lineup_availability():
     """Background thread — refreshes lineup/sidelined availability every 5 minutes."""
     import time as _time
