@@ -260,6 +260,46 @@ def fixtures():
 
 @app.route("/refresh", methods=["GET", "POST"])
 def refresh():
+    """
+    Lightweight fixtures-only refresh — synchronous, fast.
+    Used by pull-to-refresh on the frontend.
+    Returns fresh fixtures immediately so the UI can update.
+    """
+    if _cache.get("fixtures_loading"):
+        # Already refreshing — return current cache
+        cached = _cache.get("fixtures", {})
+        return jsonify({
+            "success": True,
+            "message": "Already refreshing",
+            "fixtures": cached,
+            "last_updated": _cache.get("fixtures_last_updated", ""),
+        })
+
+    try:
+        _cache["fixtures_loading"] = True
+        fix = get_sm_fixtures(days=7)
+        _cache["fixtures"] = fix
+        _cache["fixtures_last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        log.info(f"Fixtures refresh: {sum(len(v) for v in fix.values())} total")
+        return jsonify({
+            "success": True,
+            "fixtures": fix,
+            "last_updated": _cache["fixtures_last_updated"],
+        })
+    except Exception as e:
+        log.error(f"Fixtures refresh error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        _cache["fixtures_loading"] = False
+
+
+@app.route("/refresh/full", methods=["GET", "POST"])
+def refresh_full():
+    """
+    Full refresh — fixtures + standings + season scores.
+    Heavy, runs in background. Called by nightly or manual admin trigger.
+    """
     _cache["status"]          = "refreshing"
     _cache["refresh_started"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -268,7 +308,7 @@ def refresh():
             _cache["status"]       = "ok"
             _cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-            log.info("SM fixtures refresh starting...")
+            log.info("Full refresh starting...")
             if not _cache.get("fixtures_loading"):
                 _cache["fixtures_loading"] = True
                 try:
@@ -1758,7 +1798,7 @@ def nightly_run():
     5. Recalculate league averages
     6. Refresh season scores cache
     """
-    target_date = request.args.get("date") or request.json.get("date") if request.is_json else request.args.get("date")
+    target_date = request.args.get("date") or (request.get_json(silent=True) or {}).get("date")
 
     def run_nightly():
         import requests as req
