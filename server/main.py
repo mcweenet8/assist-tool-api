@@ -1273,16 +1273,56 @@ def sm_match(fixture_id):
         season_data = _cache.get("season_scores") or get_season_scores()
         all_players = season_data.get("players", [])
 
-        home_ha = _get_team_ha_stats(home_id, season_id) if season_id else {}
-        away_ha = _get_team_ha_stats(away_id, season_id) if season_id else {}
+        # ── Parallel fetch: H/A stats + SM fixture ──────────────────────────
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests as req
 
-        # ── Positional concession multipliers — cached per fixture ───────────
+        home_ha = {}
+        away_ha = {}
+        fdata   = None
+
+        def fetch_home_ha():
+            return _get_team_ha_stats(home_id, season_id) if season_id else {}
+        def fetch_away_ha():
+            return _get_team_ha_stats(away_id, season_id) if season_id else {}
+        def fetch_fixture():
+            token = os.environ.get("SPORTMONKS_API_TOKEN")
+            r = req.get(
+                f"https://api.sportmonks.com/v3/football/fixtures/{fixture_id}",
+                headers={"Authorization": token},
+                params={"include": "lineups;formations;scores;events;state;participants"},
+                timeout=20
+            )
+            return r.json().get("data", {}) if r.status_code == 200 else {}
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            f_home_ha  = executor.submit(fetch_home_ha)
+            f_away_ha  = executor.submit(fetch_away_ha)
+            f_fixture  = executor.submit(fetch_fixture)
+            home_ha = f_home_ha.result()
+            away_ha = f_away_ha.result()
+            fdata   = f_fixture.result()
+
+        # Extract team IDs from fixture participants — reuse for get_multipliers
+        participants = fdata.get("participants", [])
+        if isinstance(participants, dict): participants = participants.get("data", [])
+        fix_home_id = fix_away_id = None
+        for p in participants:
+            loc = p.get("meta", {}).get("location", "")
+            if loc == "home": fix_home_id = p.get("id")
+            elif loc == "away": fix_away_id = p.get("id")
+
+        # ── Positional concession multipliers — pass team IDs to skip SM call ─
         concession_mults = {}
         try:
             if season_id and league_id:
                 cache_key = f"mults_{fixture_id}"
                 if cache_key not in _cache:
-                    _cache[cache_key] = get_multipliers(fixture_id, season_id, league_id)
+                    _cache[cache_key] = get_multipliers(
+                        fixture_id, season_id, league_id,
+                        home_team_id=fix_home_id or home_id,
+                        away_team_id=fix_away_id or away_id
+                    )
                 concession_mults = _cache[cache_key]
         except Exception as e:
             log.warning(f"get_multipliers error {fixture_id}: {e}")
@@ -1293,13 +1333,7 @@ def sm_match(fixture_id):
         lineup_data  = {"starters": [], "subs": [], "home_formation": None, "away_formation": None, "confirmed": False}
         live_data    = {"state": None, "state_id": None, "minute": None, "score": {"home": None, "away": None}, "ht_score": {"home": None, "away": None}, "events": []}
         try:
-            import requests as req
-            token = os.environ.get("SPORTMONKS_API_TOKEN")
-            base  = "https://api.sportmonks.com/v3/football"
-            r = req.get(f"{base}/fixtures/{fixture_id}", headers={"Authorization": token}, params={"include": "lineups;formations;scores;events;state"}, timeout=20)
-            if r.status_code == 200:
-                fdata = r.json().get("data", {})
-
+            if fdata:
                 # ── Lineups ───────────────────────────────────────────────────
                 lineups = fdata.get("lineups", [])
                 if isinstance(lineups, dict): lineups = lineups.get("data", [])
@@ -1359,11 +1393,12 @@ def sm_match(fixture_id):
                     if apid and apid not in name_map and apid != "None": missing_pids.add(apid)
 
                 import requests as _req2
+                _token = os.environ.get("SPORTMONKS_API_TOKEN")
                 for mpid in missing_pids:
                     try:
                         nr = _req2.get(
                             f"https://api.sportmonks.com/v3/football/players/{mpid}",
-                            headers={"Authorization": token},
+                            headers={"Authorization": _token},
                             timeout=5
                         )
                         if nr.status_code == 200:
