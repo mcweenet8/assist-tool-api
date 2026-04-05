@@ -2342,6 +2342,41 @@ def nightly_run():
                 "outcome_recorded": True,
             })
 
+        # Flag top-ranked players whose team played today but who didn't appear in match log as DNP
+        played_pids = set(str(k) for k in minutes_lookup.keys())
+        recorded_in_outcomes = {str(row["player_id"]) for row in outcome_rows}
+        for p in ranked_players:
+            pid = str(p.get("player_id", ""))
+            team_id = str(p.get("team_id", ""))
+            if pid in played_pids: continue           # played — already handled
+            if pid in recorded_in_outcomes: continue  # already in outcome_rows
+            if team_id not in today_team_ids: continue # team didn't play today
+            # Player's team played but they have no minutes — DNP
+            outcome_rows.append({
+                "game_date":        today,
+                "fixture_id":       player_fixture.get(pid),
+                "player_id":        int(pid),
+                "player_name":      p.get("player_name"),
+                "team_name":        p.get("team_name"),
+                "league_id":        p.get("league_id"),
+                "sm_assist_rank":   assist_rank_map.get(pid),
+                "sm_goal_rank":     goal_rank_map.get(pid),
+                "sm_tsoa_rank":     tsoa_rank_map.get(pid),
+                "assist_index":     p.get("assist_index"),
+                "goal_score":       p.get("goal_score"),
+                "tsoa_score":       p.get("tsoa_score"),
+                "concession_flag":  nightly_context.get(pid, {}).get("concession_flag"),
+                "actual_goals":     0,
+                "actual_assists":   0,
+                "actual_shots":     0,
+                "actual_sot":       0,
+                "had_contribution": False,
+                "minutes_played":   0,
+                "dnp":              True,
+                "sub_on":           False,
+                "outcome_recorded": True,
+            })
+
         # Also record top 20 non-contributors so Hit% is accurate
         recorded_pids = set(all_pids)
         for market_name, ranked_list, rank_map in [
