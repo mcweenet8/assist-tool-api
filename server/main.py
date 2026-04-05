@@ -1337,10 +1337,15 @@ def sm_match_live(fixture_id):
     if _cache_valid(cache_key, 20) and cached:
         return jsonify(cached)
 
-    # Build name map from player_baselines for goal event names
+    # Build name map from season_scores cache — covers all scored players
+    # Fall back to Supabase player_baselines if cache is cold
     try:
-        pb = supabase.table("player_baselines").select("player_id,player_name").execute().data
-        name_map = {str(r["player_id"]): r["player_name"] for r in pb if r.get("player_name")}
+        season_data = _cache.get("season_scores") or {}
+        all_players = season_data.get("players", [])
+        name_map = {str(p["player_id"]): p["player_name"] for p in all_players if p.get("player_name")}
+        if not name_map:
+            pb = supabase.table("player_baselines").select("player_id,player_name").execute().data
+            name_map = {str(r["player_id"]): r["player_name"] for r in pb if r.get("player_name")}
     except:
         name_map = {}
 
@@ -1396,11 +1401,34 @@ def sm_match_live(fixture_id):
             events = fdata.get("events", [])
             if isinstance(events, dict): events = events.get("data", [])
             key_events = []
+            pids_to_fetch = set()
+            raw_events = []
             for e in events:
                 if e.get("type_id") not in [14, 15]: continue
-                pid   = str(e.get("player_id", ""))
-                apid  = str(e.get("related_player_id", ""))
-                tid   = e.get("participant_id")
+                pid  = str(e.get("player_id", ""))
+                apid = str(e.get("related_player_id", ""))
+                if pid and pid not in name_map: pids_to_fetch.add(pid)
+                if apid and apid not in name_map and apid != "None": pids_to_fetch.add(apid)
+                raw_events.append(e)
+
+            # Fetch missing names from SM in one pass
+            for pid in pids_to_fetch:
+                try:
+                    nr = _req.get(
+                        f"{sm_base}/players/{pid}",
+                        headers={"Authorization": token},
+                        timeout=5
+                    )
+                    if nr.status_code == 200:
+                        pdata = nr.json().get("data", {})
+                        name = pdata.get("display_name") or pdata.get("name")
+                        if name: name_map[pid] = name
+                except: pass
+
+            for e in raw_events:
+                pid  = str(e.get("player_id", ""))
+                apid = str(e.get("related_player_id", ""))
+                tid  = e.get("participant_id")
                 key_events.append({
                     "minute":      e.get("minute"),
                     "player_name": name_map.get(pid) or f"Player {pid}",
