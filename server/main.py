@@ -2356,6 +2356,46 @@ def nightly_run():
     return jsonify({"status": "ok", "message": "Nightly pipeline started", "date": datetime.now().__class__.__name__})
 
 
+@app.route('/api/season/archive', methods=['POST'])
+def archive_season_baselines():
+    try:
+        log.info("Season archive: starting...")
+        rows = supabase.table("player_baselines").select("*").execute().data
+        if not rows:
+            return jsonify({"error": "No rows in player_baselines"}), 400
+
+        log.info(f"Season archive: copying {len(rows)} rows...")
+
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        archive_rows = []
+        for r in rows:
+            row = {k: v for k, v in r.items() if k != "id"}
+            row["copied_at"] = now
+            archive_rows.append(row)
+
+        inserted = 0
+        for i in range(0, len(archive_rows), 100):
+            batch = archive_rows[i:i+100]
+            supabase.table("player_baselines_historical").upsert(
+                batch,
+                on_conflict="player_id,season_id"
+            ).execute()
+            inserted += len(batch)
+            log.info(f"Season archive: {inserted}/{len(archive_rows)} rows written")
+
+        log.info(f"Season archive: complete — {inserted} rows archived")
+        return jsonify({
+            "success": True,
+            "rows_archived": inserted,
+            "copied_at": now
+        })
+
+    except Exception as e:
+        log.error(f"Season archive error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/nightly/status', methods=['GET'])
 def nightly_status():
     return jsonify({
