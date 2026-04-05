@@ -384,7 +384,7 @@ def sm_today_context():
     # Serve from cache if fresh (5 min TTL) — keyed by date
     date_param = request.args.get("date", "today")
     cache_key  = f"today_context_{date_param}"
-    if _cache_valid(cache_key, 300) and _cache.get(cache_key):
+    if _cache_valid(cache_key, 1800) and _cache.get(cache_key):
         return jsonify(_cache[cache_key])
     try:
         from .positional_concessions import apply_concession_multiplier, GRANULAR_POSITION_MAP, BROAD_MAP
@@ -997,6 +997,12 @@ def sm_continental_schedule():
 # ── Team helpers ──────────────────────────────────────────────────────────────
 
 def _get_team_ha_stats(team_id, season_id):
+    # Cache per team/season — 6 hour TTL, stats don't change mid-day
+    cache_key = f"ha_stats_{team_id}_{season_id}"
+    cached = _cache.get(cache_key)
+    if _cache_valid(cache_key, 21600) and cached:
+        return cached
+
     import requests as req
     token = os.environ.get("SPORTMONKS_API_TOKEN")
     base  = "https://api.sportmonks.com/v3/football"
@@ -1029,6 +1035,8 @@ def _get_team_ha_stats(team_id, season_id):
             "cs_home": get_count(194,"home"), "cs_away": get_count(194,"away"),
             "weak_def_home": get_avg(88,"home") >= 1.5, "weak_def_away": get_avg(88,"away") >= 1.5,
         }
+        _cache_set(cache_key, result)
+        return result
     except Exception as e:
         log.error(f"team ha stats error {team_id}: {e}")
         return {}
