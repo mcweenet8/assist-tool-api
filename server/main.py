@@ -1531,6 +1531,22 @@ def sm_player_sidelined(player_id):
         return jsonify({"sidelined": None, "error": str(e)}), 500
 
 
+@app.route('/api/sm/team-sidelined/<int:team_id>', methods=['GET'])
+def sm_team_sidelined(team_id):
+    try:
+        from supabase import create_client
+        sb = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
+        rows = sb.table("player_sidelined")\
+            .select("player_id,player_name,injury_type,start_date,end_date,games_missed")\
+            .eq("team_id", team_id)\
+            .eq("completed", False)\
+            .gte("start_date", "2025-07-01")\
+            .execute().data
+        return jsonify({"sidelined": rows or []})
+    except Exception as e:
+        return jsonify({"sidelined": [], "error": str(e)}), 500
+
+
 @app.route('/api/sm/team-form/<int:team_id>', methods=['GET'])
 def sm_team_form(team_id):
     """
