@@ -1348,9 +1348,32 @@ def sm_match(fixture_id):
                 # ── Events ────────────────────────────────────────────────────
                 events = fdata.get("events", [])
                 if isinstance(events, dict): events = events.get("data", [])
+
+                # Collect pids missing from name_map and fetch from SM
+                goal_events = [e for e in events if e.get("type_id") in [14, 15]]
+                missing_pids = set()
+                for e in goal_events:
+                    pid  = str(e.get("player_id", ""))
+                    apid = str(e.get("related_player_id", ""))
+                    if pid  and pid  not in name_map: missing_pids.add(pid)
+                    if apid and apid not in name_map and apid != "None": missing_pids.add(apid)
+
+                import requests as _req2
+                for mpid in missing_pids:
+                    try:
+                        nr = _req2.get(
+                            f"https://api.sportmonks.com/v3/football/players/{mpid}",
+                            headers={"Authorization": token},
+                            timeout=5
+                        )
+                        if nr.status_code == 200:
+                            pdata = nr.json().get("data", {})
+                            name  = pdata.get("display_name") or pdata.get("name")
+                            if name: name_map[mpid] = name
+                    except: pass
+
                 key_events = []
-                for e in events:
-                    if e.get("type_id") not in [14, 15]: continue  # 14=goal, 15=own goal
+                for e in goal_events:
                     pid      = str(e.get("player_id", ""))
                     apid     = str(e.get("related_player_id", ""))
                     team_id  = e.get("participant_id")
