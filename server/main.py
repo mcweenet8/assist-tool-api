@@ -1997,7 +1997,7 @@ def nightly_run():
         today_players   = [p for p in all_players if str(p.get("team_id", "")) in today_team_ids]
 
         # ── Exclude sidelined players from today rankings ─────────────────────
-        today_team_id_ints = {int(t) for t in today_team_ids if t}
+        today_team_id_ints = {int(t) for t in today_team_ids if t and t != 'None' and str(t).isdigit()}
         sidelined_ids = get_sidelined_player_ids(team_ids=today_team_id_ints)
         if sidelined_ids:
             log.info(f"Nightly: excluding {len(sidelined_ids)} sidelined players from today rankings")
