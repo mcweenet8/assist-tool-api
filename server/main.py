@@ -1339,8 +1339,8 @@ def sm_match_live(fixture_id):
 
     # Build name map from player_baselines for goal event names
     try:
-        pb = supabase.table("player_baselines").select("player_id,name").execute().data
-        name_map = {str(r["player_id"]): r["name"] for r in pb if r.get("name")}
+        pb = supabase.table("player_baselines").select("player_id,player_name").execute().data
+        name_map = {str(r["player_id"]): r["player_name"] for r in pb if r.get("player_name")}
     except:
         name_map = {}
 
